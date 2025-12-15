@@ -161,14 +161,14 @@ import (
 	"context"
 	"log"
 	"net/http"
-	"strings"
+	{{if not (and .Auth .Auth.Enabled)}}"strings"{{end}}
 
 	"{{.ProjectName}}/internal/db"
 	"github.com/gin-gonic/gin"
 	"cloud.google.com/go/firestore"
 	"google.golang.org/api/iterator"
 	{{if and .Auth .Auth.Enabled}}
-	"{{.ProjectName}}/internal/auth"
+	auth "{{.ProjectName}}/internal/auth"
 	"{{.ProjectName}}/internal/handlers"
 	firebase "firebase.google.com/go/v4"
 	{{end}}
@@ -203,8 +203,8 @@ func main() {
 	{{if and .Auth .Auth.Enabled}}
 	// Auth Routes
 	authGroup := r.Group("/auth")
-	authGroup.POST("/login", userHandler.Login)
-	authGroup.POST("/register", userHandler.Login)
+	authGroup.POST("/login", auth.AuthMiddleware(authClient), userHandler.Login)
+	authGroup.POST("/register", auth.AuthMiddleware(authClient), userHandler.Login)
 	authGroup.GET("/me", auth.AuthMiddleware(authClient), userHandler.GetMe)
 	authGroup.GET("/roles", auth.AuthMiddleware(authClient), userHandler.GetRoles)
 	{{end}}
@@ -245,7 +245,7 @@ func AuthMiddleware() gin.HandlerFunc {
 	}
 }
 {{end}}
-`
+
 func createListHandler(client *db.Client, collection string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		iter := client.Firestore.Collection(collection).Documents(c.Request.Context())
