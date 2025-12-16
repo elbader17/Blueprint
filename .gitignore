@@ -1,5 +1,5 @@
 # Binaries
-blueprint
+/blueprint
 blueprint_gen
 *.exe
 *.exe~
