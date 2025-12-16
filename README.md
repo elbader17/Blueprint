@@ -56,12 +56,20 @@ For the generated API to work correctly, you need to configure your Firebase pro
 ./blueprint_gen blueprint.md
 ```
 
-3. A new folder with your project name (e.g., `ShopMasterAPI`) will be created.
-4. Enter the folder and run your new API:
+3. The generator will:
+   - Create the project structure.
+   - Install dependencies.
+   - Generate Swagger documentation.
+   - **Automatically start the API server**.
+
+4. You will see the server logs in your terminal. You can stop it with `Ctrl+C`.
+
+## Manual Run
+
+If you want to run the API manually later:
 
 ```bash
 cd ShopMasterAPI
-go mod tidy
 go run cmd/api/main.go
 ```
 

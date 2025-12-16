@@ -51,5 +51,41 @@ func ParseBlueprint(filename string) (*Config, error) {
 		return nil, fmt.Errorf("failed to parse JSON: %w", err)
 	}
 
+	// Auto-create user model if auth is enabled and model is missing
+	if config.Auth != nil && config.Auth.Enabled {
+		userCollection := config.Auth.UserCollection
+		if userCollection == "" {
+			userCollection = "users"
+			config.Auth.UserCollection = userCollection
+		}
+
+		hasUserModel := false
+		for _, model := range config.Models {
+			if model.Name == userCollection {
+				hasUserModel = true
+				break
+			}
+		}
+
+		if !hasUserModel {
+			userModel := Model{
+				Name:      userCollection,
+				Protected: true,
+				Fields: map[string]string{
+					"uid":        "string",
+					"email":      "string",
+					"name":       "string",
+					"picture":    "string",
+					"roleId":     "string",
+					"settingsId": "string",
+					"created_at": "datetime",
+					"updated_at": "datetime",
+				},
+				Relations: map[string]string{},
+			}
+			config.Models = append(config.Models, userModel)
+		}
+	}
+
 	return &config, nil
 }

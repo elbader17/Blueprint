@@ -43,7 +43,7 @@ func Generate(config *parser.Config, outputDir string) error {
 
 	// Generate Auth files if enabled
 	if config.Auth != nil && config.Auth.Enabled {
-		if err := generateAuthFiles(projectPath); err != nil {
+		if err := generateAuthFiles(projectPath, config); err != nil {
 			return err
 		}
 	}
@@ -61,6 +61,11 @@ func Generate(config *parser.Config, outputDir string) error {
 
 	// Generate setup_and_test.sh
 	if err := generateTestScript(projectPath, config); err != nil {
+		return err
+	}
+
+	// Generate setup.sh
+	if err := generateSetupScript(projectPath, config); err != nil {
 		return err
 	}
 
@@ -219,14 +224,23 @@ func (r *FirestoreRepository) Delete(ctx context.Context, collection, id string)
 	return os.WriteFile(filepath.Join(projectPath, "internal/db/firestore.go"), []byte(content), 0644)
 }
 
-func generateAuthFiles(projectPath string) error {
+func generateAuthFiles(projectPath string, config *parser.Config) error {
 	if err := os.WriteFile(filepath.Join(projectPath, "internal/auth/middleware.go"), []byte(AuthMiddlewareTemplate), 0644); err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(projectPath, "internal/handlers/auth.go"), []byte(AuthHandlerTemplate), 0644); err != nil {
+
+	tmpl, err := template.New("auth_handler").Parse(AuthHandlerTemplate)
+	if err != nil {
 		return err
 	}
-	return nil
+
+	f, err := os.Create(filepath.Join(projectPath, "internal/handlers/auth.go"))
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	return tmpl.Execute(f, config)
 }
 
 func generateMain(projectPath string, config *parser.Config) error {
@@ -236,6 +250,7 @@ import (
 	{{if and .Auth .Auth.Enabled}}"context"{{end}}
 	"log"
 	"net/http"
+	"os"
 	{{if not (and .Auth .Auth.Enabled)}}"strings"{{end}}
 
 	"{{.ProjectName}}/internal/db"
@@ -244,9 +259,10 @@ import (
 	ginSwagger "github.com/swaggo/gin-swagger"
 	_ "{{.ProjectName}}/docs"
 	{{if and .Auth .Auth.Enabled}}
-	auth "{{.ProjectName}}/internal/auth"
+	"{{.ProjectName}}/internal/auth"
 	"{{.ProjectName}}/internal/handlers"
 	firebase "firebase.google.com/go/v4"
+	firebaseAuth "firebase.google.com/go/v4/auth"
 	{{end}}
 )
 
@@ -267,18 +283,26 @@ func main() {
 	defer repo.Close()
 
 	{{if and .Auth .Auth.Enabled}}
-	// Initialize Firebase Auth
-	app, err := firebase.NewApp(context.Background(), &firebase.Config{ProjectID: "{{.FirestoreProjectID}}"})
-	if err != nil {
-		log.Fatalf("error initializing app: %v\n", err)
-	}
-	authClient, err := app.Auth(context.Background())
-	if err != nil {
-		log.Fatalf("error getting Auth client: %v\n", err)
+	// Initialize Auth Service
+	var authService auth.AuthService
+	if os.Getenv("MOCK_AUTH") == "true" {
+		log.Println("Using Mock Auth Service")
+		authService = &auth.MockAuthService{}
+	} else {
+		// Initialize Firebase Auth
+		app, err := firebase.NewApp(context.Background(), &firebase.Config{ProjectID: "{{.FirestoreProjectID}}"})
+		if err != nil {
+			log.Fatalf("error initializing app: %v\n", err)
+		}
+		authClient, err := app.Auth(context.Background())
+		if err != nil {
+			log.Fatalf("error getting Auth client: %v\n", err)
+		}
+		authService = &auth.FirebaseAuthService{Client: authClient}
 	}
 
 	// Initialize User Handler
-	userHandler := handlers.NewUserHandler(authClient, repo.GetClient(), "{{.Auth.UserCollection}}")
+	userHandler := handlers.NewUserHandler(authService, repo, "{{.Auth.UserCollection}}")
 	{{end}}
 
 	// Setup Router
@@ -290,10 +314,10 @@ func main() {
 	{{if and .Auth .Auth.Enabled}}
 	// Auth Routes
 	authGroup := r.Group("/auth")
-	authGroup.POST("/login", auth.AuthMiddleware(authClient), userHandler.Login)
-	authGroup.POST("/register", auth.AuthMiddleware(authClient), userHandler.Login)
-	authGroup.GET("/me", auth.AuthMiddleware(authClient), userHandler.GetMe)
-	authGroup.GET("/roles", auth.AuthMiddleware(authClient), userHandler.GetRoles)
+	authGroup.POST("/login", auth.AuthMiddleware(authService), userHandler.Login)
+	authGroup.POST("/register", auth.AuthMiddleware(authService), userHandler.Login)
+	authGroup.GET("/me", auth.AuthMiddleware(authService), userHandler.GetMe)
+	authGroup.GET("/roles", auth.AuthMiddleware(authService), userHandler.GetRoles)
 	{{end}}
 
 	{{range .Models}}
@@ -302,7 +326,7 @@ func main() {
 		group := r.Group("/api/{{.Name}}")
 		{{if .Protected}}
 		{{if and $.Auth $.Auth.Enabled}}
-		group.Use(auth.AuthMiddleware(authClient))
+		group.Use(auth.AuthMiddleware(authService))
 		{{else}}
 		group.Use(AuthMiddleware())
 		{{end}}
@@ -443,7 +467,31 @@ func get{{.Name}}Handler(c *gin.Context) {
 // @Success 201 {object} map[string]interface{}
 // @Router /api/{{.Name}} [post]
 func create{{.Name}}Handler(c *gin.Context) {
-	genericCreateHandler("{{.Name}}")(c)
+	var data map[string]interface{}
+	if err := c.ShouldBindJSON(&data); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	{{if .Protected}}
+	{{if index .Relations "user_id"}}
+	userTokenInterface, exists := c.Get("user")
+	if exists {
+		if token, ok := userTokenInterface.(*firebaseAuth.Token); ok {
+			data["user_id"] = token.UID
+		}
+	}
+	{{end}}
+	{{end}}
+	
+	id, err := repo.Create(c.Request.Context(), "{{.Name}}", data)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	
+	data["id"] = id
+	c.JSON(http.StatusCreated, data)
 }
 
 // update{{.Name}}Handler godoc
@@ -502,9 +550,9 @@ func generateTestScript(projectPath string, config *parser.Config) error {
 	}
 
 	// Helper to generate JSON payload
-	generateJSON := func(fields map[string]string) string {
+	generateJSON := func(model parser.Model) string {
 		var parts []string
-		for k, v := range fields {
+		for k, v := range model.Fields {
 			var val string
 			switch v {
 			case "string", "text":
@@ -522,6 +570,16 @@ func generateTestScript(projectPath string, config *parser.Config) error {
 			}
 			parts = append(parts, fmt.Sprintf("\"%s\": %s", k, val))
 		}
+		// Add relations
+		for k, v := range model.Relations {
+			if strings.HasPrefix(v, "belongsTo") {
+				// If protected and relation is user_id, skip (injected by backend)
+				if model.Protected && k == "user_id" {
+					continue
+				}
+				parts = append(parts, fmt.Sprintf("\"%s\": \"test_%s\"", k, k))
+			}
+		}
 		return fmt.Sprintf("{%s}", strings.Join(parts, ", "))
 	}
 
@@ -534,14 +592,22 @@ func generateTestScript(projectPath string, config *parser.Config) error {
 	fmt.Fprintf(f, "./update_docs.sh\n\n")
 
 	fmt.Fprintf(f, "echo \"Starting server in background...\"\n")
+	fmt.Fprintf(f, "export MOCK_AUTH=true\n")
 	fmt.Fprintf(f, "go run cmd/api/main.go &\n")
 	fmt.Fprintf(f, "PID=$!\n")
 	fmt.Fprintf(f, "sleep 5\n\n") // Wait for server to start
 
 	fmt.Fprintf(f, "echo \"Running tests...\"\n\n")
 
+	// Test Auth Login if enabled
+	if config.Auth != nil && config.Auth.Enabled {
+		fmt.Fprintf(f, "echo \"Testing POST /auth/login\"\n")
+		fmt.Fprintf(f, "curl -X POST -H \"Authorization: Bearer mock-token\" -H \"Content-Type: application/json\" -d '{\"role\": \"admin\"}' http://localhost:8080/auth/login\n")
+		fmt.Fprintf(f, "echo \"\\n\"\n")
+	}
+
 	for _, model := range config.Models {
-		payload := generateJSON(model.Fields)
+		payload := generateJSON(model)
 		fmt.Fprintf(f, "echo \"Testing POST /api/%s\"\n", model.Name)
 		
 		authHeader := ""
@@ -590,7 +656,10 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"{{.ProjectName}}/internal/auth"
 	"{{.ProjectName}}/internal/db"
+	"{{.ProjectName}}/internal/handlers"
+	firebaseAuth "firebase.google.com/go/v4/auth"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"cloud.google.com/go/firestore"
@@ -634,6 +703,9 @@ func (m *MockRepository) Create(ctx context.Context, collection string, data map
 		m.Data[collection] = make(map[string]map[string]interface{})
 	}
 	id := "test-id"
+	if val, ok := data["id"].(string); ok && val != "" {
+		id = val
+	}
 	data["id"] = id
 	m.Data[collection][id] = data
 	return id, nil
@@ -641,10 +713,11 @@ func (m *MockRepository) Create(ctx context.Context, collection string, data map
 
 func (m *MockRepository) Update(ctx context.Context, collection, id string, data map[string]interface{}) error {
 	if m.Data[collection] == nil {
-		return fmt.Errorf("not found")
+		m.Data[collection] = make(map[string]map[string]interface{})
 	}
+	// Upsert behavior
 	if _, ok := m.Data[collection][id]; !ok {
-		return fmt.Errorf("not found")
+		m.Data[collection][id] = make(map[string]interface{})
 	}
 	// Merge
 	for k, v := range data {
@@ -671,10 +744,32 @@ func Test{{.Name | title}}Handlers(t *testing.T) {
 	// Setup
 	mockRepo := NewMockRepository()
 	repo = mockRepo // Inject mock
+	mockAuth := &auth.MockAuthService{}
+	_ = mockAuth // Suppress unused error for non-protected routes
+	
 	r := setupTestRouter()
+
+	// Simulate Login if protected or if we just want to ensure user exists
+	{{if .Protected}}
+	userHandler := handlers.NewUserHandler(mockAuth, mockRepo, "users")
+	r.POST("/auth/login", auth.AuthMiddleware(mockAuth), userHandler.Login)
+	
+	// Perform Login to create user in mock DB
+	wLogin := httptest.NewRecorder()
+	loginBody := map[string]interface{}{"role": "admin"}
+	jsonLogin, _ := json.Marshal(loginBody)
+	reqLogin, _ := http.NewRequest("POST", "/auth/login", bytes.NewBuffer(jsonLogin))
+	reqLogin.Header.Set("Content-Type", "application/json")
+	reqLogin.Header.Set("Authorization", "Bearer mock-token")
+	r.ServeHTTP(wLogin, reqLogin)
+	assert.Equal(t, http.StatusOK, wLogin.Code)
+	{{end}}
 	
 	// Register routes
 	group := r.Group("/api/{{.Name}}")
+	{{if .Protected}}
+	group.Use(auth.AuthMiddleware(mockAuth))
+	{{end}}
 	group.GET("", list{{.Name}}Handler)
 	group.GET("/:id", get{{.Name}}Handler)
 	group.POST("", create{{.Name}}Handler)
@@ -689,6 +784,9 @@ func Test{{.Name | title}}Handlers(t *testing.T) {
 		jsonBody, _ := json.Marshal(body)
 		req, _ := http.NewRequest("POST", "/api/{{.Name}}", bytes.NewBuffer(jsonBody))
 		req.Header.Set("Content-Type", "application/json")
+		{{if .Protected}}
+		req.Header.Set("Authorization", "Bearer mock-token")
+		{{end}}
 		r.ServeHTTP(w, req)
 
 		assert.Equal(t, http.StatusCreated, w.Code)
@@ -697,6 +795,9 @@ func Test{{.Name | title}}Handlers(t *testing.T) {
 	t.Run("List {{.Name}}", func(t *testing.T) {
 		w := httptest.NewRecorder()
 		req, _ := http.NewRequest("GET", "/api/{{.Name}}", nil)
+		{{if .Protected}}
+		req.Header.Set("Authorization", "Bearer mock-token")
+		{{end}}
 		r.ServeHTTP(w, req)
 
 		assert.Equal(t, http.StatusOK, w.Code)
@@ -725,4 +826,40 @@ func Test{{.Name | title}}Handlers(t *testing.T) {
 	defer f.Close()
 
 	return tmpl.Execute(f, config)
+}
+
+
+func generateSetupScript(projectPath string, config *parser.Config) error {
+	scriptPath := filepath.Join(projectPath, "setup.sh")
+	f, err := os.Create(scriptPath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	// Make script executable
+	if err := os.Chmod(scriptPath, 0755); err != nil {
+		return err
+	}
+
+	// Write script content
+	fmt.Fprintf(f, "#!/bin/bash\n\n")
+	fmt.Fprintf(f, "echo \"[1/3] Installing dependencies...\"\n")
+	fmt.Fprintf(f, "go mod tidy\n\n")
+
+	fmt.Fprintf(f, "if ! command -v swag &> /dev/null; then\n")
+	fmt.Fprintf(f, "    echo \"swag could not be found, installing...\"\n")
+	fmt.Fprintf(f, "    go install github.com/swaggo/swag/cmd/swag@latest\n")
+	fmt.Fprintf(f, "    export PATH=$PATH:$(go env GOPATH)/bin\n")
+	fmt.Fprintf(f, "fi\n\n")
+
+	fmt.Fprintf(f, "echo \"[2/3] Generating docs...\"\n")
+	fmt.Fprintf(f, "./update_docs.sh\n\n")
+
+	fmt.Fprintf(f, "echo \"[3/3] Starting server...\"\n")
+	fmt.Fprintf(f, "echo \"Server will be available at http://localhost:8080\"\n")
+	fmt.Fprintf(f, "echo \"Swagger docs available at http://localhost:8080/swagger/index.html\"\n")
+	fmt.Fprintf(f, "go run cmd/api/main.go\n")
+	
+	return nil
 }

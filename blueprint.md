@@ -5,7 +5,7 @@ This blueprint defines a comprehensive e-commerce system with authentication, pr
 ```json
 {
   "project_name": "ShopMasterAPI",
-  "firestore_project_id": "shop-master-prod",
+  "firestore_project_id": "test-blueprint-c2632",
   "auth": {
     "enabled": true,
     "user_collection": "users"
