@@ -69,6 +69,11 @@ func Generate(config *parser.Config, outputDir string) error {
 		return err
 	}
 
+	// Generate tests
+	if err := generateHandlerTests(projectPath, config); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -115,15 +120,27 @@ import (
 	"cloud.google.com/go/firestore"
 	firebase "firebase.google.com/go/v4"
 	"google.golang.org/api/option"
+	"google.golang.org/api/iterator"
 )
 
-// Client wraps the Firestore client
-type Client struct {
-	Firestore *firestore.Client
+// Repository defines the interface for database operations
+type Repository interface {
+	List(ctx context.Context, collection string) ([]map[string]interface{}, error)
+	Get(ctx context.Context, collection, id string) (map[string]interface{}, error)
+	Create(ctx context.Context, collection string, data map[string]interface{}) (string, error)
+	Update(ctx context.Context, collection, id string, data map[string]interface{}) error
+	Delete(ctx context.Context, collection, id string) error
+	Close()
+	GetClient() *firestore.Client
 }
 
-// InitFirestore initializes the Firestore client
-func InitFirestore() (*Client, error) {
+// FirestoreRepository implements Repository for Firestore
+type FirestoreRepository struct {
+	client *firestore.Client
+}
+
+// NewFirestoreRepository initializes the Firestore client and returns a Repository
+func NewFirestoreRepository() (Repository, error) {
 	ctx := context.Background()
 	
 	// Use credentials file copied to the project root
@@ -140,14 +157,63 @@ func InitFirestore() (*Client, error) {
 		return nil, fmt.Errorf("error initializing firestore: %%v", err)
 	}
 
-	return &Client{Firestore: client}, nil
+	return &FirestoreRepository{client: client}, nil
 }
 
-// Close closes the Firestore client
-func (c *Client) Close() {
-	if c.Firestore != nil {
-		c.Firestore.Close()
+func (r *FirestoreRepository) Close() {
+	if r.client != nil {
+		r.client.Close()
 	}
+}
+
+func (r *FirestoreRepository) GetClient() *firestore.Client {
+	return r.client
+}
+
+func (r *FirestoreRepository) List(ctx context.Context, collection string) ([]map[string]interface{}, error) {
+	iter := r.client.Collection(collection).Documents(ctx)
+	var results []map[string]interface{}
+	for {
+		doc, err := iter.Next()
+		if err == iterator.Done {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		data := doc.Data()
+		data["id"] = doc.Ref.ID
+		results = append(results, data)
+	}
+	return results, nil
+}
+
+func (r *FirestoreRepository) Get(ctx context.Context, collection, id string) (map[string]interface{}, error) {
+	doc, err := r.client.Collection(collection).Doc(id).Get(ctx)
+	if err != nil {
+		return nil, err
+	}
+	data := doc.Data()
+	data["id"] = doc.Ref.ID
+	return data, nil
+}
+
+func (r *FirestoreRepository) Create(ctx context.Context, collection string, data map[string]interface{}) (string, error) {
+	ref, _, err := r.client.Collection(collection).Add(ctx, data)
+	if err != nil {
+		return "", err
+	}
+	return ref.ID, nil
+}
+
+func (r *FirestoreRepository) Update(ctx context.Context, collection, id string, data map[string]interface{}) error {
+	_, err := r.client.Collection(collection).Doc(id).Set(ctx, data, firestore.MergeAll)
+	return err
+}
+
+func (r *FirestoreRepository) Delete(ctx context.Context, collection, id string) error {
+	_, err := r.client.Collection(collection).Doc(id).Delete(ctx)
+	return err
 }
 `, projectID)
 	return os.WriteFile(filepath.Join(projectPath, "internal/db/firestore.go"), []byte(content), 0644)
@@ -174,8 +240,6 @@ import (
 
 	"{{.ProjectName}}/internal/db"
 	"github.com/gin-gonic/gin"
-	"cloud.google.com/go/firestore"
-	"google.golang.org/api/iterator"
 	swaggerFiles "github.com/swaggo/files"
 	ginSwagger "github.com/swaggo/gin-swagger"
 	_ "{{.ProjectName}}/docs"
@@ -186,7 +250,7 @@ import (
 	{{end}}
 )
 
-var dbClient *db.Client
+var repo db.Repository
 
 // @title {{.ProjectName}} API
 // @version 1.0
@@ -196,11 +260,11 @@ var dbClient *db.Client
 func main() {
 	var err error
 	// Initialize Database
-	dbClient, err = db.InitFirestore()
+	repo, err = db.NewFirestoreRepository()
 	if err != nil {
 		log.Fatalf("Failed to initialize database: %v", err)
 	}
-	defer dbClient.Close()
+	defer repo.Close()
 
 	{{if and .Auth .Auth.Enabled}}
 	// Initialize Firebase Auth
@@ -214,7 +278,7 @@ func main() {
 	}
 
 	// Initialize User Handler
-	userHandler := handlers.NewUserHandler(authClient, dbClient.Firestore, "{{.Auth.UserCollection}}")
+	userHandler := handlers.NewUserHandler(authClient, repo.GetClient(), "{{.Auth.UserCollection}}")
 	{{end}}
 
 	// Setup Router
@@ -273,20 +337,10 @@ func AuthMiddleware() gin.HandlerFunc {
 
 func genericListHandler(collection string) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		iter := dbClient.Firestore.Collection(collection).Documents(c.Request.Context())
-		var results []map[string]interface{}
-		for {
-			doc, err := iter.Next()
-			if err == iterator.Done {
-				break
-			}
-			if err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-				return
-			}
-			data := doc.Data()
-			data["id"] = doc.Ref.ID
-			results = append(results, data)
+		results, err := repo.List(c.Request.Context(), collection)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
 		}
 		c.JSON(http.StatusOK, results)
 	}
@@ -295,13 +349,11 @@ func genericListHandler(collection string) gin.HandlerFunc {
 func genericGetHandler(collection string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		id := c.Param("id")
-		doc, err := dbClient.Firestore.Collection(collection).Doc(id).Get(c.Request.Context())
+		data, err := repo.Get(c.Request.Context(), collection, id)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
-		data := doc.Data()
-		data["id"] = doc.Ref.ID
 		c.JSON(http.StatusOK, data)
 	}
 }
@@ -314,13 +366,13 @@ func genericCreateHandler(collection string) gin.HandlerFunc {
 			return
 		}
 		
-		ref, _, err := dbClient.Firestore.Collection(collection).Add(c.Request.Context(), data)
+		id, err := repo.Create(c.Request.Context(), collection, data)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
 		
-		data["id"] = ref.ID
+		data["id"] = id
 		c.JSON(http.StatusCreated, data)
 	}
 }
@@ -334,8 +386,7 @@ func genericUpdateHandler(collection string) gin.HandlerFunc {
 			return
 		}
 		
-		_, err := dbClient.Firestore.Collection(collection).Doc(id).Set(c.Request.Context(), data, firestore.MergeAll)
-		if err != nil {
+		if err := repo.Update(c.Request.Context(), collection, id, data); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
@@ -347,8 +398,7 @@ func genericUpdateHandler(collection string) gin.HandlerFunc {
 func genericDeleteHandler(collection string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		id := c.Param("id")
-		_, err := dbClient.Firestore.Collection(collection).Doc(id).Delete(c.Request.Context())
-		if err != nil {
+		if err := repo.Delete(c.Request.Context(), collection, id); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
@@ -526,4 +576,153 @@ func generateDocsScript(projectPath string) error {
 	fmt.Fprintf(f, "swag init -g cmd/api/main.go\n")
 	
 	return nil
+}
+
+func generateHandlerTests(projectPath string, config *parser.Config) error {
+	const testTemplate = `package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"{{.ProjectName}}/internal/db"
+	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/assert"
+	"cloud.google.com/go/firestore"
+)
+
+// MockRepository implements db.Repository for testing
+type MockRepository struct {
+	Data map[string]map[string]map[string]interface{}
+}
+
+func NewMockRepository() db.Repository {
+	return &MockRepository{
+		Data: make(map[string]map[string]map[string]interface{}),
+	}
+}
+
+func (m *MockRepository) Close() {}
+func (m *MockRepository) GetClient() *firestore.Client { return nil }
+
+func (m *MockRepository) List(ctx context.Context, collection string) ([]map[string]interface{}, error) {
+	var results []map[string]interface{}
+	if cols, ok := m.Data[collection]; ok {
+		for _, v := range cols {
+			results = append(results, v)
+		}
+	}
+	return results, nil
+}
+
+func (m *MockRepository) Get(ctx context.Context, collection, id string) (map[string]interface{}, error) {
+	if cols, ok := m.Data[collection]; ok {
+		if val, ok := cols[id]; ok {
+			return val, nil
+		}
+	}
+	return nil, fmt.Errorf("not found")
+}
+
+func (m *MockRepository) Create(ctx context.Context, collection string, data map[string]interface{}) (string, error) {
+	if m.Data[collection] == nil {
+		m.Data[collection] = make(map[string]map[string]interface{})
+	}
+	id := "test-id"
+	data["id"] = id
+	m.Data[collection][id] = data
+	return id, nil
+}
+
+func (m *MockRepository) Update(ctx context.Context, collection, id string, data map[string]interface{}) error {
+	if m.Data[collection] == nil {
+		return fmt.Errorf("not found")
+	}
+	if _, ok := m.Data[collection][id]; !ok {
+		return fmt.Errorf("not found")
+	}
+	// Merge
+	for k, v := range data {
+		m.Data[collection][id][k] = v
+	}
+	return nil
+}
+
+func (m *MockRepository) Delete(ctx context.Context, collection, id string) error {
+	if m.Data[collection] != nil {
+		delete(m.Data[collection], id)
+	}
+	return nil
+}
+
+func setupTestRouter() *gin.Engine {
+	gin.SetMode(gin.TestMode)
+	r := gin.Default()
+	return r
+}
+
+{{range .Models}}
+func Test{{.Name | title}}Handlers(t *testing.T) {
+	// Setup
+	mockRepo := NewMockRepository()
+	repo = mockRepo // Inject mock
+	r := setupTestRouter()
+	
+	// Register routes
+	group := r.Group("/api/{{.Name}}")
+	group.GET("", list{{.Name}}Handler)
+	group.GET("/:id", get{{.Name}}Handler)
+	group.POST("", create{{.Name}}Handler)
+	group.PUT("/:id", update{{.Name}}Handler)
+	group.DELETE("/:id", delete{{.Name}}Handler)
+
+	t.Run("Create {{.Name}}", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		body := map[string]interface{}{
+			"test_field": "test_value",
+		}
+		jsonBody, _ := json.Marshal(body)
+		req, _ := http.NewRequest("POST", "/api/{{.Name}}", bytes.NewBuffer(jsonBody))
+		req.Header.Set("Content-Type", "application/json")
+		r.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusCreated, w.Code)
+	})
+
+	t.Run("List {{.Name}}", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		req, _ := http.NewRequest("GET", "/api/{{.Name}}", nil)
+		r.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusOK, w.Code)
+	})
+}
+{{end}}
+`
+	funcMap := template.FuncMap{
+		"title": func(s string) string {
+			if s == "" {
+				return ""
+			}
+			return strings.ToUpper(s[:1]) + s[1:]
+		},
+	}
+
+	tmpl, err := template.New("test").Funcs(funcMap).Parse(testTemplate)
+	if err != nil {
+		return err
+	}
+
+	f, err := os.Create(filepath.Join(projectPath, "cmd/api/handlers_test.go"))
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	return tmpl.Execute(f, config)
 }

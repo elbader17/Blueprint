@@ -8,6 +8,8 @@ Blueprint is a CLI tool written in Go that automatically generates a complete RE
 - 🔒 **Integrated Authentication**: Optional support for Firebase Auth (Login, Register, Roles).
 - 📦 **Automatic CRUD**: Generates handlers and routes to create, read, update, and delete documents.
 - 🛡️ **Protected Routes**: Easily configure which models require authentication.
+- 🧪 **Unit Tests**: Automatically generates unit tests for all endpoints.
+- 📚 **Swagger Docs**: Automatically generates Swagger documentation for your API.
 - 📄 **Simple Configuration**: Everything is defined in a single `blueprint.md` file.
 
 ## Prerequisites
@@ -20,7 +22,7 @@ Blueprint is a CLI tool written in Go that automatically generates a complete RE
 Clone the repository and build the generator:
 
 ```bash
-git clone <your-repo>
+git clone https://github.com/elbader17/Blueprint
 cd Blueprint
 go mod tidy
 go build -o blueprint_gen cmd/blueprint/main.go
@@ -61,6 +63,29 @@ For the generated API to work correctly, you need to configure your Firebase pro
 cd ShopMasterAPI
 go mod tidy
 go run cmd/api/main.go
+```
+
+## Testing
+
+The generator automatically creates unit tests for your endpoints. To run them:
+
+```bash
+cd ShopMasterAPI
+go test ./...
+```
+
+## Documentation (Swagger)
+
+The API comes with auto-generated Swagger documentation.
+
+1. Run the API.
+2. Open your browser and navigate to:
+   `http://localhost:8080/swagger/index.html`
+
+To update the documentation after making changes to the code (if you modify the generated code manually):
+
+```bash
+swag init -g cmd/api/main.go
 ```
 
 ## Blueprint Format
