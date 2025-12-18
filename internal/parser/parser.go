@@ -11,14 +11,22 @@ import (
 type Config struct {
 	ProjectName        string  `json:"project_name"`
 	FirestoreProjectID string  `json:"firestore_project_id"`
-	Auth               *Auth   `json:"auth,omitempty"`
-	Models             []Model `json:"models"`
+	Auth               *Auth     `json:"auth,omitempty"`
+	Payments           *Payments `json:"payments,omitempty"`
+	Models             []Model   `json:"models"`
 }
 
 // Auth configures the authentication module
 type Auth struct {
 	Enabled        bool   `json:"enabled"`
 	UserCollection string `json:"user_collection"`
+}
+
+// Payments configures the payment module
+type Payments struct {
+	Enabled           bool   `json:"enabled"`
+	Provider          string `json:"provider"` // e.g., "mercadopago"
+	TransactionsColl string `json:"transactions_collection"`
 }
 
 // Model represents a data model definition
@@ -84,6 +92,37 @@ func ParseBlueprint(filename string) (*Config, error) {
 				Relations: map[string]string{},
 			}
 			config.Models = append(config.Models, userModel)
+		}
+	}
+
+	// Auto-create transaction model if payments are enabled and model is missing
+	if config.Payments != nil && config.Payments.Enabled {
+		transCollection := config.Payments.TransactionsColl
+		if transCollection == "" {
+			transCollection = "transactions"
+			config.Payments.TransactionsColl = transCollection
+		}
+
+		hasTransModel := false
+		for _, model := range config.Models {
+			if model.Name == transCollection {
+				hasTransModel = true
+				break
+			}
+		}
+
+		if !hasTransModel {
+			transModel := Model{
+				Name:      transCollection,
+				Protected: true,
+				Fields: map[string]string{
+					"provider":   "string",
+					"payload":    "text",
+					"created_at": "datetime",
+				},
+				Relations: map[string]string{},
+			}
+			config.Models = append(config.Models, transModel)
 		}
 	}
 

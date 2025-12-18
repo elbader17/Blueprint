@@ -10,6 +10,11 @@ This blueprint defines a comprehensive e-commerce system with authentication, pr
     "enabled": true,
     "user_collection": "users"
   },
+  "payments": {
+    "enabled": true,
+    "provider": "mercadopago",
+    "transactions_collection": "transactions"
+  },
   "models": [
     {
       "name": "categories",

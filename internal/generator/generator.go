@@ -24,6 +24,8 @@ func Generate(config *parser.Config, outputDir string) error {
 		"internal/db",
 		"internal/auth",
 		"internal/handlers",
+		"internal/payments",
+		"internal/config",
 	}
 	for _, dir := range dirs {
 		if err := os.MkdirAll(filepath.Join(projectPath, dir), 0755); err != nil {
@@ -44,6 +46,16 @@ func Generate(config *parser.Config, outputDir string) error {
 	// Generate Auth files if enabled
 	if config.Auth != nil && config.Auth.Enabled {
 		if err := generateAuthFiles(projectPath, config); err != nil {
+			return err
+		}
+	}
+
+	// Generate Payment files if enabled
+	if config.Payments != nil && config.Payments.Enabled {
+		if err := generateConfigFiles(projectPath, config); err != nil {
+			return err
+		}
+		if err := generatePaymentFiles(projectPath, config); err != nil {
 			return err
 		}
 	}
@@ -224,6 +236,36 @@ func (r *FirestoreRepository) Delete(ctx context.Context, collection, id string)
 	return os.WriteFile(filepath.Join(projectPath, "internal/db/firestore.go"), []byte(content), 0644)
 }
 
+func generatePaymentFiles(projectPath string, config *parser.Config) error {
+	tmpl, err := template.New("mercadopago").Parse(MercadoPagoTemplate)
+	if err != nil {
+		return err
+	}
+
+	f, err := os.Create(filepath.Join(projectPath, "internal/payments/mercadopago.go"))
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	return tmpl.Execute(f, config)
+}
+
+func generateConfigFiles(projectPath string, config *parser.Config) error {
+	tmpl, err := template.New("config").Parse(ConfigTemplate)
+	if err != nil {
+		return err
+	}
+
+	f, err := os.Create(filepath.Join(projectPath, "internal/config/config.go"))
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	return tmpl.Execute(f, config)
+}
+
 func generateAuthFiles(projectPath string, config *parser.Config) error {
 	if err := os.WriteFile(filepath.Join(projectPath, "internal/auth/middleware.go"), []byte(AuthMiddlewareTemplate), 0644); err != nil {
 		return err
@@ -263,6 +305,9 @@ import (
 	"{{.ProjectName}}/internal/handlers"
 	firebase "firebase.google.com/go/v4"
 	firebaseAuth "firebase.google.com/go/v4/auth"
+	{{end}}
+	{{if and .Payments .Payments.Enabled}}
+	"{{.ProjectName}}/internal/payments"
 	{{end}}
 )
 
@@ -305,6 +350,11 @@ func main() {
 	userHandler := handlers.NewUserHandler(authService, repo, "{{.Auth.UserCollection}}")
 	{{end}}
 
+	{{if and .Payments .Payments.Enabled}}
+	// Initialize Payment Service
+	mpService := payments.NewMercadoPagoService(repo, "{{.Payments.TransactionsColl}}")
+	{{end}}
+
 	// Setup Router
 	r := gin.Default()
 
@@ -318,6 +368,13 @@ func main() {
 	authGroup.POST("/register", auth.AuthMiddleware(authService), userHandler.Login)
 	authGroup.GET("/me", auth.AuthMiddleware(authService), userHandler.GetMe)
 	authGroup.GET("/roles", auth.AuthMiddleware(authService), userHandler.GetRoles)
+	{{end}}
+
+	{{if and .Payments .Payments.Enabled}}
+	// Payment Routes
+	paymentGroup := r.Group("/payments")
+	paymentGroup.POST("/mercadopago/preference", mpService.CreatePreferenceHandler)
+	paymentGroup.POST("/mercadopago/webhook", mpService.HandleWebhook)
 	{{end}}
 
 	{{range .Models}}
@@ -593,6 +650,9 @@ func generateTestScript(projectPath string, config *parser.Config) error {
 
 	fmt.Fprintf(f, "echo \"Starting server in background...\"\n")
 	fmt.Fprintf(f, "export MOCK_AUTH=true\n")
+	if config.Payments != nil && config.Payments.Enabled {
+		fmt.Fprintf(f, "export MP_ACCESS_TOKEN=\"TEST_MP_TOKEN_12345\"\n")
+	}
 	fmt.Fprintf(f, "go run cmd/api/main.go &\n")
 	fmt.Fprintf(f, "PID=$!\n")
 	fmt.Fprintf(f, "sleep 5\n\n") // Wait for server to start
@@ -859,6 +919,9 @@ func generateSetupScript(projectPath string, config *parser.Config) error {
 	fmt.Fprintf(f, "echo \"[3/3] Starting server...\"\n")
 	fmt.Fprintf(f, "echo \"Server will be available at http://localhost:8080\"\n")
 	fmt.Fprintf(f, "echo \"Swagger docs available at http://localhost:8080/swagger/index.html\"\n")
+	if config.Payments != nil && config.Payments.Enabled {
+		fmt.Fprintf(f, "export MP_ACCESS_TOKEN=\"YOUR_MERCADO_PAGO_ACCESS_TOKEN_HERE\"\n")
+	}
 	fmt.Fprintf(f, "go run cmd/api/main.go\n")
 	
 	return nil

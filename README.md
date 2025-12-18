@@ -9,6 +9,7 @@ Blueprint is a CLI tool written in Go that automatically generates a complete RE
 - 📦 **Automatic CRUD**: Generates handlers and routes to create, read, update, and delete documents.
 - 🛡️ **Protected Routes**: Easily configure which models require authentication.
 - 🧪 **Unit Tests**: Automatically generates unit tests for all endpoints.
+- 💳 **Mercado Pago Integration**: Easily enable payments and transaction tracking.
 - 📚 **Swagger Docs**: Automatically generates Swagger documentation for your API.
 - 📄 **Simple Configuration**: Everything is defined in a single `blueprint.md` file.
 
@@ -46,6 +47,17 @@ For the generated API to work correctly, you need to configure your Firebase pro
 5. **Place it** in the root of the directory where you will run the generator (or in the root of your generated API).
 
 > ⚠️ **IMPORTANT**: Never upload this file to a public repository. Add it to your `.gitignore`.
+
+### 3. Mercado Pago Access Token (Optional)
+If you enable the `payments` module, you need a Mercado Pago Access Token.
+
+1. Go to the [Mercado Pago Developers](https://www.mercadopago.com.ar/developers/panel) panel.
+2. Select your application (or create a new one).
+3. Go to **Production Credentials** or **Test Credentials**.
+4. Copy the **Access Token**.
+5. In your generated project, you can:
+   - Set it as an environment variable: `export MP_ACCESS_TOKEN=your_token_here`
+   - Or modify the `setup.sh` file before running it.
 
 ## Usage
 
@@ -111,9 +123,13 @@ System architecture definition.
 {
   "project_name": "ShopMasterAPI",
   "firestore_project_id": "shop-master-prod",
-  "auth": {
     "enabled": true,
     "user_collection": "users"
+  },
+  "payments": {
+    "enabled": true,
+    "provider": "mercadopago",
+    "transactions_collection": "transactions"
   },
   "models": [
     {
@@ -153,6 +169,10 @@ System architecture definition.
 - **`auth`** (Optional):
     - `enabled`: `true` to activate the login/register system.
     - `user_collection`: Name of the Firestore collection where users will be stored (e.g., "users").
+- **`payments`** (Optional):
+    - `enabled`: `true` to activate the payment system.
+    - `provider`: Currently only `mercadopago` is supported.
+    - `transactions_collection`: Name of the Firestore collection where payment notifications will be stored.
 - **`models`**: List of your database entities.
     - `name`: Name of the collection in Firestore.
     - `protected`: If `true`, routes for this model will require a valid Bearer token.
@@ -167,6 +187,14 @@ If you enable `auth`, the following will be available:
 - `POST /auth/register`: Register a new user.
 - `GET /auth/me`: Get current user profile (Requires Token).
 - `GET /auth/roles`: List available roles (Requires Token).
+
+If you enable `payments`, the following will be available:
+
+- `POST /payments/mercadopago/preference`: Create a payment preference.
+- `POST /payments/mercadopago/webhook`: Webhook to receive payment notifications.
+
+> [!IMPORTANT]
+> To use Mercado Pago, you must set the `MP_ACCESS_TOKEN` environment variable. You can find this in the [Mercado Pago Developers Dashboard](https://www.mercadopago.com.ar/developers/panel).
 
 For each model (e.g., `products`):
 
