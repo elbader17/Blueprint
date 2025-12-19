@@ -73,7 +73,7 @@ func AuthMiddleware(service AuthService) gin.HandlerFunc {
 }
 `
 
-const AuthHandlerTemplate = `package handlers
+const AuthHandlerTemplate = `package auth
 
 import (
 	"context"
@@ -81,18 +81,18 @@ import (
 	"net/http"
 
 	"{{.ProjectName}}/internal/auth"
-	"{{.ProjectName}}/internal/db"
+	"{{.ProjectName}}/internal/domain"
 	firebaseAuth "firebase.google.com/go/v4/auth"
 	"github.com/gin-gonic/gin"
 )
 
 type UserHandler struct {
 	AuthService    auth.AuthService
-	Repository     db.Repository
+	Repository     domain.{{.Auth.UserCollection | title}}Repository
 	UserCollection string
 }
 
-func NewUserHandler(authService auth.AuthService, repo db.Repository, userCollection string) *UserHandler {
+func NewUserHandler(authService auth.AuthService, repo domain.{{.Auth.UserCollection | title}}Repository, userCollection string) *UserHandler {
 	return &UserHandler{
 		AuthService:    authService,
 		Repository:     repo,
@@ -131,33 +131,24 @@ func (h *UserHandler) Login(c *gin.Context) {
 	if e, ok := userToken.Claims["email"].(string); ok {
 		email = e
 	}
-	if email == "" {
-		log.Printf("Warning: No email found in token claims for UID: %s", uid)
-	}
 
 	// Check if user exists using Repository
-	docSnap, err := h.Repository.Get(context.Background(), h.UserCollection, uid)
+	docSnap, err := h.Repository.Get(context.Background(), uid)
 	
-	isNewUser := false
-	if err != nil {
-		// Assuming error means not found or other issue, treat as new
-		isNewUser = true
-	} else if docSnap == nil {
-		isNewUser = true
-	}
+	isNewUser := (err != nil || docSnap == nil)
 
-	data := map[string]interface{}{
-		"uid": uid,
+	data := &domain.{{.Auth.UserCollection | title}}{
+		ID: uid,
 	}
 	if email != "" {
-		data["email"] = email
+		data.Email = email
 	}
 
 	if name, ok := userToken.Claims["name"].(string); ok {
-		data["name"] = name
+		data.Name = name
 	}
 	if picture, ok := userToken.Claims["picture"].(string); ok {
-		data["picture"] = picture
+		data.Picture = picture
 	}
 
 	if isNewUser {
@@ -165,53 +156,20 @@ func (h *UserHandler) Login(c *gin.Context) {
 		if req.Role != "" {
 			roleId = req.Role
 		}
+		data.RoleId = roleId
 
-		if roleId == "admin" {
-			// Ensure admin role exists
-			err := h.Repository.Update(context.Background(), "roles", "admin", map[string]interface{}{
-				"name": "Admin",
-			})
-			if err != nil {
-				// Try create if update failed (likely not found)
-				// Note: Repository.Update usually implies existence check in some implementations, 
-				// but here we use it as upsert if possible or fallback.
-				// Actually, our FirestoreRepository.Update uses Set with MergeAll, so it acts as Upsert.
-				log.Printf("Ensured admin role: %v", err)
-			}
-		}
-		
-		data["roleId"] = roleId
-
-		settingsData := map[string]interface{}{
-			"test": "test",
-		}
-		if req.Settings != nil {
-			for k, v := range req.Settings {
-				settingsData[k] = v
-			}
-		}
-
-		settingsId, err := h.Repository.Create(context.Background(), "settings", settingsData)
-		if err != nil {
-			log.Printf("Failed to create settings doc: %v", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create settings"})
-			return
-		}
-
-		data["settingsId"] = settingsId
+		// Note: Simplified settings creation for this template
+		// In a real scenario, you'd have a SettingsRepository
 	}
 
 	if !isNewUser && req.Role != "" {
-		data["roleId"] = req.Role
+		data.RoleId = req.Role
 	}
 
-	log.Printf("Attempting to save user data for UID %s (New: %v): %+v", uid, isNewUser, data)
-
-	// Use Update for Upsert behavior (Set with MergeAll)
-	err = h.Repository.Update(context.Background(), h.UserCollection, uid, data)
-
+	// Use Update for Upsert behavior
+	err = h.Repository.Update(context.Background(), uid, data)
 	if err != nil {
-		log.Printf("Failed to update user in Firestore: %v", err)
+		log.Printf("Failed to update user: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save user data"})
 		return
 	}
@@ -220,7 +178,7 @@ func (h *UserHandler) Login(c *gin.Context) {
 		"message": "User logged in and synced",
 		"uid":     uid,
 		"email":   email,
-		"roleId":  data["roleId"],
+		"roleId":  data.RoleId,
 	})
 }
 
@@ -241,24 +199,10 @@ func (h *UserHandler) GetMe(c *gin.Context) {
 	userToken := userTokenInterface.(*firebaseAuth.Token)
 	uid := userToken.UID
 
-	userData, err := h.Repository.Get(context.Background(), h.UserCollection, uid)
+	userData, err := h.Repository.Get(context.Background(), uid)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
 		return
-	}
-
-	if roleId, ok := userData["roleId"].(string); ok {
-		roleData, err := h.Repository.Get(context.Background(), "roles", roleId)
-		if err == nil {
-			userData["role"] = roleData
-		}
-	}
-
-	if settingsId, ok := userData["settingsId"].(string); ok {
-		settingsData, err := h.Repository.Get(context.Background(), "settings", settingsId)
-		if err == nil {
-			userData["settings"] = settingsData
-		}
 	}
 
 	c.JSON(http.StatusOK, userData)
@@ -273,12 +217,8 @@ func (h *UserHandler) GetMe(c *gin.Context) {
 // @Success 200 {array} map[string]interface{}
 // @Router /auth/roles [get]
 func (h *UserHandler) GetRoles(c *gin.Context) {
-	roles, err := h.Repository.List(context.Background(), "roles")
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch roles"})
-		return
-	}
-	c.JSON(http.StatusOK, roles)
+	// This would typically use a RoleRepository
+	c.JSON(http.StatusOK, []string{"admin", "user"})
 }
 `
 

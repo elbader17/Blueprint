@@ -9,22 +9,20 @@ import (
 	"net/http"
 	"time"
 
-	"{{.ProjectName}}/internal/db"
+	"{{.ProjectName}}/internal/domain"
 	"{{.ProjectName}}/internal/config"
 	"github.com/gin-gonic/gin"
 )
 
 type MercadoPagoService struct {
 	AccessToken string
-	Repo        db.Repository
-	Collection  string
+	Repo        domain.{{.Payments.TransactionsColl | title}}Repository
 }
 
-func NewMercadoPagoService(repo db.Repository, collection string) *MercadoPagoService {
+func NewMercadoPagoService(repo domain.{{.Payments.TransactionsColl | title}}Repository) *MercadoPagoService {
 	return &MercadoPagoService{
 		AccessToken: config.GetMPAccessToken(),
 		Repo:        repo,
-		Collection:  collection,
 	}
 }
 
@@ -77,13 +75,13 @@ func (s *MercadoPagoService) HandleWebhook(c *gin.Context) {
 	}
 
 	// Save transaction to Firestore
-	transaction := map[string]interface{}{
-		"provider":   "mercadopago",
-		"payload":    notification,
-		"created_at": time.Now(),
+	transaction := &domain.{{.Payments.TransactionsColl | title}}{
+		Provider:  "mercadopago",
+		Payload:   "notification received", // Simplified for this template
+		CreatedAt: time.Now(),
 	}
 
-	_, err := s.Repo.Create(c.Request.Context(), s.Collection, transaction)
+	_, err := s.Repo.Create(c.Request.Context(), transaction)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return

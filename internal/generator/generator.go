@@ -1,108 +1,189 @@
 package generator
 
 import (
+	"bytes"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
-	"text/template"
 
-	"github.com/eduardo/blueprint/internal/parser"
+	"github.com/eduardo/blueprint/internal/domain"
 )
 
 // Generate creates the API project based on the config
-func Generate(config *parser.Config, outputDir string) error {
+func Generate(config *domain.Config, outputDir string, fs domain.FileSystemPort, template domain.TemplatePort) error {
 	projectPath := filepath.Join(outputDir, config.ProjectName)
 	fmt.Printf("Creating project at %s\n", projectPath)
-	if err := os.MkdirAll(projectPath, 0755); err != nil {
+	
+	if err := fs.MkdirAll(projectPath); err != nil {
 		return fmt.Errorf("failed to create project directory: %w", err)
 	}
 
-	// Create directories
-	dirs := []string{
-		"cmd/api",
+	// Cleanup old directories/files if they exist
+	oldPaths := []string{
 		"internal/db",
-		"internal/auth",
 		"internal/handlers",
-		"internal/payments",
-		"internal/config",
+		"internal/domain",
+		"cmd/api/handlers_test.go",
 	}
-	for _, dir := range dirs {
-		if err := os.MkdirAll(filepath.Join(projectPath, dir), 0755); err != nil {
-			return fmt.Errorf("failed to create directory %s: %w", dir, err)
+	for _, p := range oldPaths {
+		if err := fs.RemoveAll(filepath.Join(projectPath, p)); err != nil {
+			fmt.Printf("Warning: failed to remove old path %s: %v\n", p, err)
 		}
 	}
 
-	// Generate go.mod
-	if err := generateGoMod(projectPath, config.ProjectName); err != nil {
-		return err
-	}
-
-	// Generate internal/db/firestore.go
-	if err := generateFirestore(projectPath, config); err != nil {
-		return err
-	}
-
-	// Generate Auth files if enabled
+	// Inject required models for Auth and Payments if missing
 	if config.Auth != nil && config.Auth.Enabled {
-		if err := generateAuthFiles(projectPath, config); err != nil {
-			return err
+		found := false
+		for _, m := range config.Models {
+			if strings.EqualFold(m.Name, config.Auth.UserCollection) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			config.Models = append(config.Models, domain.Model{
+				Name:      config.Auth.UserCollection,
+				Protected: true,
+				Fields: map[string]string{
+					"email":   "string",
+					"name":    "string",
+					"role_id": "string",
+					"picture": "string",
+				},
+			})
 		}
 	}
 
-	// Generate Payment files if enabled
 	if config.Payments != nil && config.Payments.Enabled {
-		if err := generateConfigFiles(projectPath, config); err != nil {
+		found := false
+		for _, m := range config.Models {
+			if strings.EqualFold(m.Name, config.Payments.TransactionsColl) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			config.Models = append(config.Models, domain.Model{
+				Name:      config.Payments.TransactionsColl,
+				Protected: true,
+				Fields: map[string]string{
+					"amount":     "float",
+					"status":     "string",
+					"provider":   "string",
+					"created_at": "datetime",
+					"payload":    "string",
+				},
+			})
+		}
+	}
+
+	if err := createDirectories(projectPath, config, fs); err != nil {
+		return err
+	}
+
+	if err := generateGoMod(projectPath, config.ProjectName, fs); err != nil {
+		return err
+	}
+
+	if err := generateFirestore(projectPath, config, fs, template); err != nil {
+		return err
+	}
+
+	if err := generateAuth(projectPath, config, fs, template); err != nil {
+		return err
+	}
+
+	if err := generatePayments(projectPath, config, fs, template); err != nil {
+		return err
+	}
+
+	for _, model := range config.Models {
+		if err := generateModelDomain(projectPath, config, model, fs, template); err != nil {
 			return err
 		}
-		if err := generatePaymentFiles(projectPath, config); err != nil {
+		if err := generateModelRepository(projectPath, config, model, fs, template); err != nil {
+			return err
+		}
+		if err := generateModelHandlers(projectPath, config, model, fs, template); err != nil {
+			return err
+		}
+		if err := generateModelHandlerTests(projectPath, config, model, fs, template); err != nil {
 			return err
 		}
 	}
 
-	// Copy firebaseCredentials.json
-	if err := copyFile("firebaseCredentials.json", filepath.Join(projectPath, "firebaseCredentials.json")); err != nil {
-		// Warn but don't fail if credentials don't exist, maybe user wants to add them later
+	if err := copyFirebaseCredentials(projectPath, fs); err != nil {
 		fmt.Printf("Warning: firebaseCredentials.json not found or could not be copied: %v\n", err)
 	}
 
-	// Generate cmd/api/main.go
-	if err := generateMain(projectPath, config); err != nil {
+	if err := generateMain(projectPath, config, fs, template); err != nil {
 		return err
 	}
 
-	// Generate setup_and_test.sh
-	if err := generateTestScript(projectPath, config); err != nil {
+	if err := generateScripts(projectPath, config, fs); err != nil {
 		return err
 	}
 
-	// Generate setup.sh
-	if err := generateSetupScript(projectPath, config); err != nil {
-		return err
-	}
-
-	// Generate update_docs.sh
-	if err := generateDocsScript(projectPath); err != nil {
-		return err
-	}
-
-	// Generate tests
-	if err := generateHandlerTests(projectPath, config); err != nil {
+	if err := generateArchitectureDocs(projectPath, fs); err != nil {
 		return err
 	}
 
 	return nil
 }
 
-func copyFile(src, dst string) error {
-	input, err := os.ReadFile(src)
-	if err != nil {
-		return err
+func createDirectories(projectPath string, config *domain.Config, fs domain.FileSystemPort) error {
+	dirs := []string{
+		"cmd/api",
+		"internal/domain",
+		"internal/infrastructure/db",
+		"internal/auth",
+		"internal/handlers/auth",
+		"internal/payments",
+		"internal/config",
 	}
-	return os.WriteFile(dst, input, 0644)
+	for _, model := range config.Models {
+		dirs = append(dirs, filepath.Join("internal/handlers", strings.ToLower(model.Name)))
+	}
+	for _, dir := range dirs {
+		if err := fs.MkdirAll(filepath.Join(projectPath, dir)); err != nil {
+			return fmt.Errorf("failed to create directory %s: %w", dir, err)
+		}
+	}
+	return nil
 }
 
-func generateGoMod(projectPath, projectName string) error {
+func generateAuth(projectPath string, config *domain.Config, fs domain.FileSystemPort, template domain.TemplatePort) error {
+	if config.Auth == nil || !config.Auth.Enabled {
+		return nil
+	}
+	return generateAuthFiles(projectPath, config, fs, template)
+}
+
+func generatePayments(projectPath string, config *domain.Config, fs domain.FileSystemPort, template domain.TemplatePort) error {
+	if config.Payments == nil || !config.Payments.Enabled {
+		return nil
+	}
+	if err := generateConfigFiles(projectPath, config, fs, template); err != nil {
+		return err
+	}
+	return generatePaymentFiles(projectPath, config, fs, template)
+}
+
+func copyFirebaseCredentials(projectPath string, fs domain.FileSystemPort) error {
+	return fs.CopyFile("firebaseCredentials.json", filepath.Join(projectPath, "firebaseCredentials.json"))
+}
+
+func generateScripts(projectPath string, config *domain.Config, fs domain.FileSystemPort) error {
+	if err := generateTestScript(projectPath, config, fs); err != nil {
+		return err
+	}
+	if err := generateSetupScript(projectPath, config, fs); err != nil {
+		return err
+	}
+	return generateDocsScript(projectPath, fs)
+}
+
+func generateGoMod(projectPath, projectName string, fs domain.FileSystemPort) error {
 	content := fmt.Sprintf(`module %s
 
 go 1.21
@@ -117,18 +198,11 @@ require (
 	github.com/swaggo/swag v1.16.2
 )
 `, projectName)
-	return os.WriteFile(filepath.Join(projectPath, "go.mod"), []byte(content), 0644)
+	return fs.WriteFile(filepath.Join(projectPath, "go.mod"), []byte(content))
 }
 
-func generateFirestore(projectPath string, config *parser.Config) error {
-	// Embedding the content of firestore.go directly for simplicity in this MVP
-	// We use the ProjectID from config, defaulting to a placeholder if empty
-	projectID := config.FirestoreProjectID
-	if projectID == "" {
-		projectID = "tiendaonline-mvp"
-	}
-
-	content := fmt.Sprintf(`package db
+func generateFirestore(projectPath string, config *domain.Config, fs domain.FileSystemPort, template domain.TemplatePort) error {
+	const firestoreTemplate = `package db
 
 import (
 	"context"
@@ -162,16 +236,16 @@ func NewFirestoreRepository() (Repository, error) {
 	
 	// Use credentials file copied to the project root
 	opt := option.WithCredentialsFile("firebaseCredentials.json")
-	conf := &firebase.Config{ProjectID: "%s"}
+	conf := &firebase.Config{ProjectID: "{{.FirestoreProjectID}}"}
 	
 	app, err := firebase.NewApp(ctx, conf, opt)
 	if err != nil {
-		return nil, fmt.Errorf("error initializing app: %%v", err)
+		return nil, fmt.Errorf("error initializing app: %v", err)
 	}
 
 	client, err := app.Firestore(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("error initializing firestore: %%v", err)
+		return nil, fmt.Errorf("error initializing firestore: %v", err)
 	}
 
 	return &FirestoreRepository{client: client}, nil
@@ -232,107 +306,298 @@ func (r *FirestoreRepository) Delete(ctx context.Context, collection, id string)
 	_, err := r.client.Collection(collection).Doc(id).Delete(ctx)
 	return err
 }
-`, projectID)
-	return os.WriteFile(filepath.Join(projectPath, "internal/db/firestore.go"), []byte(content), 0644)
+`
+	if config.FirestoreProjectID == "" {
+		config.FirestoreProjectID = "tiendaonline-mvp"
+	}
+
+	content, err := template.Render("firestore", firestoreTemplate, config)
+	if err != nil {
+		return err
+	}
+	return fs.WriteFile(filepath.Join(projectPath, "internal/infrastructure/db/firestore.go"), content)
 }
 
-func generatePaymentFiles(projectPath string, config *parser.Config) error {
-	tmpl, err := template.New("mercadopago").Parse(MercadoPagoTemplate)
-	if err != nil {
-		return err
-	}
+func generateModelDomain(projectPath string, config *domain.Config, model domain.Model, fs domain.FileSystemPort, template domain.TemplatePort) error {
+	const domainTemplate = `package domain
 
-	f, err := os.Create(filepath.Join(projectPath, "internal/payments/mercadopago.go"))
-	if err != nil {
-		return err
-	}
-	defer f.Close()
+import "context"
 
-	return tmpl.Execute(f, config)
+type {{.Model.Name | title}} struct {
+	ID string ` + "`" + `json:"id"` + "`" + `
+	{{range $k, $v := .Model.Fields}}
+	{{$k | pascal}} {{if eq $v "string"}}string{{else if eq $v "integer"}}int{{else if eq $v "float"}}float64{{else if eq $v "boolean"}}bool{{else}}interface{}{{end}} ` + "`" + `json:"{{$k}}"` + "`" + `
+	{{end}}
+	{{range $k, $v := .Model.Relations}}
+	{{$k | pascal}} string ` + "`" + `json:"{{$k}}"` + "`" + `
+	{{end}}
 }
 
-func generateConfigFiles(projectPath string, config *parser.Config) error {
-	tmpl, err := template.New("config").Parse(ConfigTemplate)
+type {{.Model.Name | title}}Repository interface {
+	List(ctx context.Context) ([]*{{.Model.Name | title}}, error)
+	Get(ctx context.Context, id string) (*{{.Model.Name | title}}, error)
+	Create(ctx context.Context, model *{{.Model.Name | title}}) (string, error)
+	Update(ctx context.Context, id string, model *{{.Model.Name | title}}) error
+	Delete(ctx context.Context, id string) error
+}
+`
+	data := struct {
+		ProjectName string
+		Model       domain.Model
+	}{
+		ProjectName: config.ProjectName,
+		Model:       model,
+	}
+
+	content, err := template.Render(model.Name+"_domain", domainTemplate, data)
 	if err != nil {
 		return err
 	}
-
-	f, err := os.Create(filepath.Join(projectPath, "internal/config/config.go"))
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	return tmpl.Execute(f, config)
+	return fs.WriteFile(filepath.Join(projectPath, "internal/domain", strings.ToLower(model.Name)+".go"), content)
 }
 
-func generateAuthFiles(projectPath string, config *parser.Config) error {
-	if err := os.WriteFile(filepath.Join(projectPath, "internal/auth/middleware.go"), []byte(AuthMiddlewareTemplate), 0644); err != nil {
-		return err
-	}
+func generateModelHandlers(projectPath string, config *domain.Config, model domain.Model, fs domain.FileSystemPort, template domain.TemplatePort) error {
+	const handlerTemplate = `package {{.Model.Name | lower}}
 
-	tmpl, err := template.New("auth_handler").Parse(AuthHandlerTemplate)
-	if err != nil {
-		return err
-	}
+import (
+	"net/http"
+	"{{.ProjectName}}/internal/domain"
+	"github.com/gin-gonic/gin"
+)
 
-	f, err := os.Create(filepath.Join(projectPath, "internal/handlers/auth.go"))
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	return tmpl.Execute(f, config)
+type {{.Model.Name | title}}Handler struct {
+	repo domain.{{.Model.Name | title}}Repository
 }
 
-func generateMain(projectPath string, config *parser.Config) error {
+func New{{.Model.Name | title}}Handler(repo domain.{{.Model.Name | title}}Repository) *{{.Model.Name | title}}Handler {
+	return &{{.Model.Name | title}}Handler{repo: repo}
+}
+
+func (h *{{.Model.Name | title}}Handler) List(c *gin.Context) {
+	results, err := h.repo.List(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, results)
+}
+
+func (h *{{.Model.Name | title}}Handler) Get(c *gin.Context) {
+	id := c.Param("id")
+	result, err := h.repo.Get(c.Request.Context(), id)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+		return
+	}
+	c.JSON(http.StatusOK, result)
+}
+
+func (h *{{.Model.Name | title}}Handler) Create(c *gin.Context) {
+	var m domain.{{.Model.Name | title}}
+	if err := c.ShouldBindJSON(&m); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	id, err := h.repo.Create(c.Request.Context(), &m)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	m.ID = id
+	c.JSON(http.StatusCreated, m)
+}
+
+func (h *{{.Model.Name | title}}Handler) Update(c *gin.Context) {
+	id := c.Param("id")
+	var m domain.{{.Model.Name | title}}
+	if err := c.ShouldBindJSON(&m); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if err := h.repo.Update(c.Request.Context(), id, &m); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "updated"})
+}
+
+func (h *{{.Model.Name | title}}Handler) Delete(c *gin.Context) {
+	id := c.Param("id")
+	if err := h.repo.Delete(c.Request.Context(), id); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "deleted"})
+}
+`
+	data := struct {
+		ProjectName string
+		Model       domain.Model
+	}{
+		ProjectName: config.ProjectName,
+		Model:       model,
+	}
+
+	content, err := template.Render(model.Name+"_handler", handlerTemplate, data)
+	if err != nil {
+		return err
+	}
+	return fs.WriteFile(filepath.Join(projectPath, "internal/handlers", strings.ToLower(model.Name), "handler.go"), content)
+}
+
+func generatePaymentFiles(projectPath string, config *domain.Config, fs domain.FileSystemPort, template domain.TemplatePort) error {
+	content, err := template.Render("mercadopago", MercadoPagoTemplate, config)
+	if err != nil {
+		return err
+	}
+	return fs.WriteFile(filepath.Join(projectPath, "internal/payments/mercadopago.go"), content)
+}
+
+func generateConfigFiles(projectPath string, config *domain.Config, fs domain.FileSystemPort, template domain.TemplatePort) error {
+	content, err := template.Render("config", ConfigTemplate, config)
+	if err != nil {
+		return err
+	}
+	return fs.WriteFile(filepath.Join(projectPath, "internal/config/config.go"), content)
+}
+
+func generateAuthFiles(projectPath string, config *domain.Config, fs domain.FileSystemPort, template domain.TemplatePort) error {
+	if err := fs.WriteFile(filepath.Join(projectPath, "internal/auth/middleware.go"), []byte(AuthMiddlewareTemplate)); err != nil {
+		return err
+	}
+
+	content, err := template.Render("auth_handler", AuthHandlerTemplate, config)
+	if err != nil {
+		return err
+	}
+	return fs.WriteFile(filepath.Join(projectPath, "internal/handlers/auth/handler.go"), content)
+}
+
+func generateModelRepository(projectPath string, config *domain.Config, model domain.Model, fs domain.FileSystemPort, template domain.TemplatePort) error {
+	const repoTemplate = `package db
+
+import (
+	"context"
+	"{{.ProjectName}}/internal/domain"
+	"google.golang.org/api/iterator"
+)
+
+type {{.Model.Name | title}}Repository struct {
+	client *FirestoreRepository
+}
+
+func New{{.Model.Name | title}}Repository(client *FirestoreRepository) *{{.Model.Name | title}}Repository {
+	return &{{.Model.Name | title}}Repository{client: client}
+}
+
+func (r *{{.Model.Name | title}}Repository) List(ctx context.Context) ([]*domain.{{.Model.Name | title}}, error) {
+	iter := r.client.client.Collection("{{.Model.Name}}").Documents(ctx)
+	var results []*domain.{{.Model.Name | title}}
+	for {
+		doc, err := iter.Next()
+		if err == iterator.Done {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		var m domain.{{.Model.Name | title}}
+		if err := doc.DataTo(&m); err != nil {
+			return nil, err
+		}
+		m.ID = doc.Ref.ID
+		results = append(results, &m)
+	}
+	return results, nil
+}
+
+func (r *{{.Model.Name | title}}Repository) Get(ctx context.Context, id string) (*domain.{{.Model.Name | title}}, error) {
+	doc, err := r.client.client.Collection("{{.Model.Name}}").Doc(id).Get(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var m domain.{{.Model.Name | title}}
+	if err := doc.DataTo(&m); err != nil {
+		return nil, err
+	}
+	m.ID = doc.Ref.ID
+	return &m, nil
+}
+
+func (r *{{.Model.Name | title}}Repository) Create(ctx context.Context, m *domain.{{.Model.Name | title}}) (string, error) {
+	ref, _, err := r.client.client.Collection("{{.Model.Name}}").Add(ctx, m)
+	if err != nil {
+		return "", err
+	}
+	return ref.ID, nil
+}
+
+func (r *{{.Model.Name | title}}Repository) Update(ctx context.Context, id string, m *domain.{{.Model.Name | title}}) error {
+	_, err := r.client.client.Collection("{{.Model.Name}}").Doc(id).Set(ctx, m)
+	return err
+}
+
+func (r *{{.Model.Name | title}}Repository) Delete(ctx context.Context, id string) error {
+	_, err := r.client.client.Collection("{{.Model.Name}}").Doc(id).Delete(ctx)
+	return err
+}
+`
+	data := struct {
+		ProjectName string
+		Model       domain.Model
+	}{
+		ProjectName: config.ProjectName,
+		Model:       model,
+	}
+
+	content, err := template.Render(model.Name+"_repo", repoTemplate, data)
+	if err != nil {
+		return err
+	}
+	return fs.WriteFile(filepath.Join(projectPath, "internal/infrastructure/db", strings.ToLower(model.Name)+"_repository.go"), content)
+}
+
+func generateMain(projectPath string, config *domain.Config, fs domain.FileSystemPort, template domain.TemplatePort) error {
 	const mainTemplate = `package main
 
 import (
 	{{if and .Auth .Auth.Enabled}}"context"{{end}}
 	"log"
-	"net/http"
 	"os"
 	{{if not (and .Auth .Auth.Enabled)}}"strings"{{end}}
 
-	"{{.ProjectName}}/internal/db"
+	"{{.ProjectName}}/internal/infrastructure/db"
 	"github.com/gin-gonic/gin"
 	swaggerFiles "github.com/swaggo/files"
 	ginSwagger "github.com/swaggo/gin-swagger"
 	_ "{{.ProjectName}}/docs"
 	{{if and .Auth .Auth.Enabled}}
-	"{{.ProjectName}}/internal/auth"
-	"{{.ProjectName}}/internal/handlers"
+	authService "{{.ProjectName}}/internal/auth"
+	authHandler "{{.ProjectName}}/internal/handlers/auth"
 	firebase "firebase.google.com/go/v4"
-	firebaseAuth "firebase.google.com/go/v4/auth"
 	{{end}}
 	{{if and .Payments .Payments.Enabled}}
 	"{{.ProjectName}}/internal/payments"
 	{{end}}
+	{{range .Models}}
+	"{{$.ProjectName}}/internal/handlers/{{.Name | lower}}"
+	{{end}}
 )
 
-var repo db.Repository
-
-// @title {{.ProjectName}} API
-// @version 1.0
-// @description API generated by Blueprint
-// @host localhost:8080
-// @BasePath /
 func main() {
-	var err error
 	// Initialize Database
-	repo, err = db.NewFirestoreRepository()
+	baseRepo, err := db.NewFirestoreRepository()
 	if err != nil {
 		log.Fatalf("Failed to initialize database: %v", err)
 	}
-	defer repo.Close()
+	defer baseRepo.Close()
 
 	{{if and .Auth .Auth.Enabled}}
 	// Initialize Auth Service
-	var authService auth.AuthService
+	var authSvc authService.AuthService
 	if os.Getenv("MOCK_AUTH") == "true" {
 		log.Println("Using Mock Auth Service")
-		authService = &auth.MockAuthService{}
+		authSvc = &authService.MockAuthService{}
 	} else {
 		// Initialize Firebase Auth
 		app, err := firebase.NewApp(context.Background(), &firebase.Config{ProjectID: "{{.FirestoreProjectID}}"})
@@ -343,16 +608,18 @@ func main() {
 		if err != nil {
 			log.Fatalf("error getting Auth client: %v\n", err)
 		}
-		authService = &auth.FirebaseAuthService{Client: authClient}
+		authSvc = &authService.FirebaseAuthService{Client: authClient}
 	}
 
 	// Initialize User Handler
-	userHandler := handlers.NewUserHandler(authService, repo, "{{.Auth.UserCollection}}")
+	userRepo := db.New{{.Auth.UserCollection | title}}Repository(baseRepo.(*db.FirestoreRepository))
+	userHdl := authHandler.NewUserHandler(authSvc, userRepo, "{{.Auth.UserCollection}}")
 	{{end}}
 
 	{{if and .Payments .Payments.Enabled}}
 	// Initialize Payment Service
-	mpService := payments.NewMercadoPagoService(repo, "{{.Payments.TransactionsColl}}")
+	mpRepo := db.New{{.Payments.TransactionsColl | title}}Repository(baseRepo.(*db.FirestoreRepository))
+	mpService := payments.NewMercadoPagoService(mpRepo)
 	{{end}}
 
 	// Setup Router
@@ -364,10 +631,10 @@ func main() {
 	{{if and .Auth .Auth.Enabled}}
 	// Auth Routes
 	authGroup := r.Group("/auth")
-	authGroup.POST("/login", auth.AuthMiddleware(authService), userHandler.Login)
-	authGroup.POST("/register", auth.AuthMiddleware(authService), userHandler.Login)
-	authGroup.GET("/me", auth.AuthMiddleware(authService), userHandler.GetMe)
-	authGroup.GET("/roles", auth.AuthMiddleware(authService), userHandler.GetRoles)
+	authGroup.POST("/login", authService.AuthMiddleware(authSvc), userHdl.Login)
+	authGroup.POST("/register", authService.AuthMiddleware(authSvc), userHdl.Login)
+	authGroup.GET("/me", authService.AuthMiddleware(authSvc), userHdl.GetMe)
+	authGroup.GET("/roles", authService.AuthMiddleware(authSvc), userHdl.GetRoles)
 	{{end}}
 
 	{{if and .Payments .Payments.Enabled}}
@@ -380,19 +647,22 @@ func main() {
 	{{range .Models}}
 	// Routes for {{.Name}}
 	{
+		repo := db.New{{.Name | title}}Repository(baseRepo.(*db.FirestoreRepository))
+		handler := {{.Name | lower}}.New{{.Name | title}}Handler(repo)
+
 		group := r.Group("/api/{{.Name}}")
 		{{if .Protected}}
 		{{if and $.Auth $.Auth.Enabled}}
-		group.Use(auth.AuthMiddleware(authService))
+		group.Use(authService.AuthMiddleware(authSvc))
 		{{else}}
 		group.Use(AuthMiddleware())
 		{{end}}
 		{{end}}
-		group.GET("", list{{.Name}}Handler)
-		group.GET("/:id", get{{.Name}}Handler)
-		group.POST("", create{{.Name}}Handler)
-		group.PUT("/:id", update{{.Name}}Handler)
-		group.DELETE("/:id", delete{{.Name}}Handler)
+		group.GET("", handler.List)
+		group.GET("/:id", handler.Get)
+		group.POST("", handler.Create)
+		group.PUT("/:id", handler.Update)
+		group.DELETE("/:id", handler.Delete)
 	}
 	{{end}}
 
@@ -413,201 +683,18 @@ func AuthMiddleware() gin.HandlerFunc {
 	}
 }
 {{end}}
-
-// Generic Handlers
-
-func genericListHandler(collection string) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		results, err := repo.List(c.Request.Context(), collection)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
-		}
-		c.JSON(http.StatusOK, results)
-	}
-}
-
-func genericGetHandler(collection string) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		id := c.Param("id")
-		data, err := repo.Get(c.Request.Context(), collection, id)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
-		}
-		c.JSON(http.StatusOK, data)
-	}
-}
-
-func genericCreateHandler(collection string) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		var data map[string]interface{}
-		if err := c.ShouldBindJSON(&data); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-			return
-		}
-		
-		id, err := repo.Create(c.Request.Context(), collection, data)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
-		}
-		
-		data["id"] = id
-		c.JSON(http.StatusCreated, data)
-	}
-}
-
-func genericUpdateHandler(collection string) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		id := c.Param("id")
-		var data map[string]interface{}
-		if err := c.ShouldBindJSON(&data); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-			return
-		}
-		
-		if err := repo.Update(c.Request.Context(), collection, id, data); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
-		}
-		
-		c.JSON(http.StatusOK, gin.H{"status": "updated"})
-	}
-}
-
-func genericDeleteHandler(collection string) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		id := c.Param("id")
-		if err := repo.Delete(c.Request.Context(), collection, id); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
-		}
-		c.JSON(http.StatusOK, gin.H{"status": "deleted"})
-	}
-}
-
-// Specific Handlers
-{{range .Models}}
-// list{{.Name}}Handler godoc
-// @Summary List {{.Name}}
-// @Description Get all {{.Name}}
-// @Tags {{.Name}}
-// @Accept  json
-// @Produce  json
-// @Success 200 {array} map[string]interface{}
-// @Router /api/{{.Name}} [get]
-func list{{.Name}}Handler(c *gin.Context) {
-	genericListHandler("{{.Name}}")(c)
-}
-
-// get{{.Name}}Handler godoc
-// @Summary Get {{.Name}}
-// @Description Get a {{.Name}} by ID
-// @Tags {{.Name}}
-// @Accept  json
-// @Produce  json
-// @Param id path string true "{{.Name}} ID"
-// @Success 200 {object} map[string]interface{}
-// @Router /api/{{.Name}}/{id} [get]
-func get{{.Name}}Handler(c *gin.Context) {
-	genericGetHandler("{{.Name}}")(c)
-}
-
-// create{{.Name}}Handler godoc
-// @Summary Create {{.Name}}
-// @Description Create a new {{.Name}}
-// @Tags {{.Name}}
-// @Accept  json
-// @Produce  json
-// @Param {{.Name}} body map[string]interface{} true "New {{.Name}}"
-// @Success 201 {object} map[string]interface{}
-// @Router /api/{{.Name}} [post]
-func create{{.Name}}Handler(c *gin.Context) {
-	var data map[string]interface{}
-	if err := c.ShouldBindJSON(&data); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	{{if .Protected}}
-	{{if index .Relations "user_id"}}
-	userTokenInterface, exists := c.Get("user")
-	if exists {
-		if token, ok := userTokenInterface.(*firebaseAuth.Token); ok {
-			data["user_id"] = token.UID
-		}
-	}
-	{{end}}
-	{{end}}
-	
-	id, err := repo.Create(c.Request.Context(), "{{.Name}}", data)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-	
-	data["id"] = id
-	c.JSON(http.StatusCreated, data)
-}
-
-// update{{.Name}}Handler godoc
-// @Summary Update {{.Name}}
-// @Description Update a {{.Name}} by ID
-// @Tags {{.Name}}
-// @Accept  json
-// @Produce  json
-// @Param id path string true "{{.Name}} ID"
-// @Param {{.Name}} body map[string]interface{} true "Updated {{.Name}}"
-// @Success 200 {object} map[string]interface{}
-// @Router /api/{{.Name}}/{id} [put]
-func update{{.Name}}Handler(c *gin.Context) {
-	genericUpdateHandler("{{.Name}}")(c)
-}
-
-// delete{{.Name}}Handler godoc
-// @Summary Delete {{.Name}}
-// @Description Delete a {{.Name}} by ID
-// @Tags {{.Name}}
-// @Accept  json
-// @Produce  json
-// @Param id path string true "{{.Name}} ID"
-// @Success 200 {object} map[string]interface{}
-// @Router /api/{{.Name}}/{id} [delete]
-func delete{{.Name}}Handler(c *gin.Context) {
-	genericDeleteHandler("{{.Name}}")(c)
-}
-{{end}}
 `
-	tmpl, err := template.New("main").Parse(mainTemplate)
+	content, err := template.Render("main", mainTemplate, config)
 	if err != nil {
 		return err
 	}
-
-	f, err := os.Create(filepath.Join(projectPath, "cmd/api/main.go"))
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	return tmpl.Execute(f, config)
+	return fs.WriteFile(filepath.Join(projectPath, "cmd/api/main.go"), content)
 }
-
-func generateTestScript(projectPath string, config *parser.Config) error {
-	scriptPath := filepath.Join(projectPath, "setup_and_test.sh")
-	f, err := os.Create(scriptPath)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	// Make script executable
-	if err := os.Chmod(scriptPath, 0755); err != nil {
-		return err
-	}
+func generateTestScript(projectPath string, config *domain.Config, fs domain.FileSystemPort) error {
+	var buf bytes.Buffer
 
 	// Helper to generate JSON payload
-	generateJSON := func(model parser.Model) string {
+	generateJSON := func(model domain.Model) string {
 		var parts []string
 		for k, v := range model.Fields {
 			var val string
@@ -640,289 +727,251 @@ func generateTestScript(projectPath string, config *parser.Config) error {
 		return fmt.Sprintf("{%s}", strings.Join(parts, ", "))
 	}
 
-	// Write script content
-	fmt.Fprintf(f, "#!/bin/bash\n\n")
-	fmt.Fprintf(f, "echo \"Installing dependencies...\"\n")
-	fmt.Fprintf(f, "go mod tidy\n\n")
-
-	fmt.Fprintf(f, "echo \"Generating docs...\"\n")
-	fmt.Fprintf(f, "./update_docs.sh\n\n")
-
-	fmt.Fprintf(f, "echo \"Starting server in background...\"\n")
-	fmt.Fprintf(f, "export MOCK_AUTH=true\n")
+	buf.WriteString("#!/bin/bash\n\n")
+	buf.WriteString("echo \"Installing dependencies...\"\n")
+	buf.WriteString("go mod tidy\n\n")
+	buf.WriteString("echo \"Generating docs...\"\n")
+	buf.WriteString("./update_docs.sh\n\n")
+	buf.WriteString("echo \"Starting server in background...\"\n")
+	buf.WriteString("export MOCK_AUTH=true\n")
 	if config.Payments != nil && config.Payments.Enabled {
-		fmt.Fprintf(f, "export MP_ACCESS_TOKEN=\"TEST_MP_TOKEN_12345\"\n")
+		buf.WriteString("export MP_ACCESS_TOKEN=\"TEST_MP_TOKEN_12345\"\n")
 	}
-	fmt.Fprintf(f, "go run cmd/api/main.go &\n")
-	fmt.Fprintf(f, "PID=$!\n")
-	fmt.Fprintf(f, "sleep 5\n\n") // Wait for server to start
+	buf.WriteString("go run cmd/api/main.go &\n")
+	buf.WriteString("PID=$!\n")
+	buf.WriteString("sleep 5\n\n")
+	buf.WriteString("echo \"Running tests...\"\n\n")
 
-	fmt.Fprintf(f, "echo \"Running tests...\"\n\n")
-
-	// Test Auth Login if enabled
 	if config.Auth != nil && config.Auth.Enabled {
-		fmt.Fprintf(f, "echo \"Testing POST /auth/login\"\n")
-		fmt.Fprintf(f, "curl -X POST -H \"Authorization: Bearer mock-token\" -H \"Content-Type: application/json\" -d '{\"role\": \"admin\"}' http://localhost:8080/auth/login\n")
-		fmt.Fprintf(f, "echo \"\\n\"\n")
+		buf.WriteString("echo \"Testing POST /auth/login\"\n")
+		buf.WriteString("curl -X POST -H \"Authorization: Bearer mock-token\" -H \"Content-Type: application/json\" -d '{\"role\": \"admin\"}' http://localhost:8080/auth/login\n")
+		buf.WriteString("echo \"\\n\"\n")
 	}
 
 	for _, model := range config.Models {
 		payload := generateJSON(model)
-		fmt.Fprintf(f, "echo \"Testing POST /api/%s\"\n", model.Name)
-		
+		buf.WriteString(fmt.Sprintf("echo \"Testing POST /api/%s\"\n", model.Name))
 		authHeader := ""
 		if model.Protected {
 			authHeader = "-H \"Authorization: Bearer mock-token\" "
 		}
-
-		fmt.Fprintf(f, "curl -X POST %s-H \"Content-Type: application/json\" -d '%s' http://localhost:8080/api/%s\n", authHeader, payload, model.Name)
-		fmt.Fprintf(f, "echo \"\\n\"\n")
+		buf.WriteString(fmt.Sprintf("curl -X POST %s-H \"Content-Type: application/json\" -d '%s' http://localhost:8080/api/%s\n", authHeader, payload, model.Name))
+		buf.WriteString("echo \"\\n\"\n")
 	}
 
-	fmt.Fprintf(f, "\necho \"Killing server (PID: $PID)...\"\n")
-	fmt.Fprintf(f, "kill $PID\n")
-	
-	return nil
-}
+	buf.WriteString("\necho \"Killing server (PID: $PID)...\"\n")
+	buf.WriteString("kill $PID\n")
 
-func generateDocsScript(projectPath string) error {
-	scriptPath := filepath.Join(projectPath, "update_docs.sh")
-	f, err := os.Create(scriptPath)
-	if err != nil {
+	if err := fs.WriteFile(filepath.Join(projectPath, "setup_and_test.sh"), buf.Bytes()); err != nil {
 		return err
 	}
-	defer f.Close()
-
-	if err := os.Chmod(scriptPath, 0755); err != nil {
-		return err
-	}
-
-	fmt.Fprintf(f, "#!/bin/bash\n\n")
-	fmt.Fprintf(f, "echo \"Generating Swagger documentation...\"\n")
-	fmt.Fprintf(f, "swag init -g cmd/api/main.go\n")
-	
-	return nil
+	return fs.Chmod(filepath.Join(projectPath, "setup_and_test.sh"), 0755)
 }
 
-func generateHandlerTests(projectPath string, config *parser.Config) error {
-	const testTemplate = `package main
+func generateSetupScript(projectPath string, config *domain.Config, fs domain.FileSystemPort) error {
+	var buf bytes.Buffer
+	buf.WriteString("#!/bin/bash\n\n")
+	buf.WriteString("echo \"[1/3] Installing dependencies...\"\n")
+	buf.WriteString("go mod tidy\n\n")
+	buf.WriteString("export PATH=$PATH:$(go env GOPATH)/bin\n")
+	buf.WriteString("if ! command -v swag &> /dev/null; then\n")
+	buf.WriteString("    echo \"swag could not be found, installing...\"\n")
+	buf.WriteString("    go install github.com/swaggo/swag/cmd/swag@latest\n")
+	buf.WriteString("fi\n\n")
+	buf.WriteString("echo \"[2/3] Generating docs...\"\n")
+	buf.WriteString("./update_docs.sh\n\n")
+	buf.WriteString("echo \"[3/3] Starting server...\"\n")
+	buf.WriteString("echo \"Server will be available at http://localhost:8080\"\n")
+	buf.WriteString("echo \"Swagger docs available at http://localhost:8080/swagger/index.html\"\n")
+	if config.Payments != nil && config.Payments.Enabled {
+		buf.WriteString("export MP_ACCESS_TOKEN=\"YOUR_MERCADO_PAGO_ACCESS_TOKEN_HERE\"\n")
+	}
+	buf.WriteString("go run cmd/api/main.go\n")
+
+	if err := fs.WriteFile(filepath.Join(projectPath, "setup.sh"), buf.Bytes()); err != nil {
+		return err
+	}
+	return fs.Chmod(filepath.Join(projectPath, "setup.sh"), 0755)
+}
+
+func generateDocsScript(projectPath string, fs domain.FileSystemPort) error {
+	var buf bytes.Buffer
+	buf.WriteString("#!/bin/bash\n\n")
+	buf.WriteString("export PATH=$PATH:$(go env GOPATH)/bin\n\n")
+	buf.WriteString("if ! command -v swag &> /dev/null; then\n")
+	buf.WriteString("    echo \"swag could not be found, installing...\"\n")
+	buf.WriteString("    go install github.com/swaggo/swag/cmd/swag@latest\n")
+	buf.WriteString("fi\n\n")
+	buf.WriteString("echo \"Tidying dependencies...\"\n")
+	buf.WriteString("go mod tidy\n\n")
+	buf.WriteString("echo \"Generating Swagger documentation...\"\n")
+	buf.WriteString("swag init -g cmd/api/main.go --parseDependency --parseInternal\n")
+
+	if err := fs.WriteFile(filepath.Join(projectPath, "update_docs.sh"), buf.Bytes()); err != nil {
+		return err
+	}
+	return fs.Chmod(filepath.Join(projectPath, "update_docs.sh"), 0755)
+}
+
+func generateModelHandlerTests(projectPath string, config *domain.Config, model domain.Model, fs domain.FileSystemPort, template domain.TemplatePort) error {
+	const testTemplate = `package {{.Model.Name | lower}}
 
 import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
-	"{{.ProjectName}}/internal/auth"
-	"{{.ProjectName}}/internal/db"
-	"{{.ProjectName}}/internal/handlers"
-	firebaseAuth "firebase.google.com/go/v4/auth"
+	"{{.ProjectName}}/internal/domain"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
-	"cloud.google.com/go/firestore"
 )
 
-// MockRepository implements db.Repository for testing
-type MockRepository struct {
-	Data map[string]map[string]map[string]interface{}
+type Mock{{.Model.Name | title}}Repository struct {
+	Data map[string]*domain.{{.Model.Name | title}}
 }
 
-func NewMockRepository() db.Repository {
-	return &MockRepository{
-		Data: make(map[string]map[string]map[string]interface{}),
-	}
-}
-
-func (m *MockRepository) Close() {}
-func (m *MockRepository) GetClient() *firestore.Client { return nil }
-
-func (m *MockRepository) List(ctx context.Context, collection string) ([]map[string]interface{}, error) {
-	var results []map[string]interface{}
-	if cols, ok := m.Data[collection]; ok {
-		for _, v := range cols {
-			results = append(results, v)
-		}
+func (m *Mock{{.Model.Name | title}}Repository) List(ctx context.Context) ([]*domain.{{.Model.Name | title}}, error) {
+	var results []*domain.{{.Model.Name | title}}
+	for _, v := range m.Data {
+		results = append(results, v)
 	}
 	return results, nil
 }
 
-func (m *MockRepository) Get(ctx context.Context, collection, id string) (map[string]interface{}, error) {
-	if cols, ok := m.Data[collection]; ok {
-		if val, ok := cols[id]; ok {
-			return val, nil
-		}
+func (m *Mock{{.Model.Name | title}}Repository) Get(ctx context.Context, id string) (*domain.{{.Model.Name | title}}, error) {
+	if val, ok := m.Data[id]; ok {
+		return val, nil
 	}
-	return nil, fmt.Errorf("not found")
+	return nil, nil
 }
 
-func (m *MockRepository) Create(ctx context.Context, collection string, data map[string]interface{}) (string, error) {
-	if m.Data[collection] == nil {
-		m.Data[collection] = make(map[string]map[string]interface{})
-	}
+func (m *Mock{{.Model.Name | title}}Repository) Create(ctx context.Context, model *domain.{{.Model.Name | title}}) (string, error) {
 	id := "test-id"
-	if val, ok := data["id"].(string); ok && val != "" {
-		id = val
+	model.ID = id
+	if m.Data == nil {
+		m.Data = make(map[string]*domain.{{.Model.Name | title}})
 	}
-	data["id"] = id
-	m.Data[collection][id] = data
+	m.Data[id] = model
 	return id, nil
 }
 
-func (m *MockRepository) Update(ctx context.Context, collection, id string, data map[string]interface{}) error {
-	if m.Data[collection] == nil {
-		m.Data[collection] = make(map[string]map[string]interface{})
-	}
-	// Upsert behavior
-	if _, ok := m.Data[collection][id]; !ok {
-		m.Data[collection][id] = make(map[string]interface{})
-	}
-	// Merge
-	for k, v := range data {
-		m.Data[collection][id][k] = v
-	}
+func (m *Mock{{.Model.Name | title}}Repository) Update(ctx context.Context, id string, model *domain.{{.Model.Name | title}}) error {
+	m.Data[id] = model
 	return nil
 }
 
-func (m *MockRepository) Delete(ctx context.Context, collection, id string) error {
-	if m.Data[collection] != nil {
-		delete(m.Data[collection], id)
-	}
+func (m *Mock{{.Model.Name | title}}Repository) Delete(ctx context.Context, id string) error {
+	delete(m.Data, id)
 	return nil
 }
 
-func setupTestRouter() *gin.Engine {
+func Test{{.Model.Name | title}}Handler(t *testing.T) {
 	gin.SetMode(gin.TestMode)
+	repo := &Mock{{.Model.Name | title}}Repository{Data: make(map[string]*domain.{{.Model.Name | title}})}
+	handler := New{{.Model.Name | title}}Handler(repo)
 	r := gin.Default()
-	return r
-}
 
-{{range .Models}}
-func Test{{.Name | title}}Handlers(t *testing.T) {
-	// Setup
-	mockRepo := NewMockRepository()
-	repo = mockRepo // Inject mock
-	mockAuth := &auth.MockAuthService{}
-	_ = mockAuth // Suppress unused error for non-protected routes
-	
-	r := setupTestRouter()
+	r.GET("/{{.Model.Name | lower}}", handler.List)
+	r.POST("/{{.Model.Name | lower}}", handler.Create)
 
-	// Simulate Login if protected or if we just want to ensure user exists
-	{{if .Protected}}
-	userHandler := handlers.NewUserHandler(mockAuth, mockRepo, "users")
-	r.POST("/auth/login", auth.AuthMiddleware(mockAuth), userHandler.Login)
-	
-	// Perform Login to create user in mock DB
-	wLogin := httptest.NewRecorder()
-	loginBody := map[string]interface{}{"role": "admin"}
-	jsonLogin, _ := json.Marshal(loginBody)
-	reqLogin, _ := http.NewRequest("POST", "/auth/login", bytes.NewBuffer(jsonLogin))
-	reqLogin.Header.Set("Content-Type", "application/json")
-	reqLogin.Header.Set("Authorization", "Bearer mock-token")
-	r.ServeHTTP(wLogin, reqLogin)
-	assert.Equal(t, http.StatusOK, wLogin.Code)
-	{{end}}
-	
-	// Register routes
-	group := r.Group("/api/{{.Name}}")
-	{{if .Protected}}
-	group.Use(auth.AuthMiddleware(mockAuth))
-	{{end}}
-	group.GET("", list{{.Name}}Handler)
-	group.GET("/:id", get{{.Name}}Handler)
-	group.POST("", create{{.Name}}Handler)
-	group.PUT("/:id", update{{.Name}}Handler)
-	group.DELETE("/:id", delete{{.Name}}Handler)
-
-	t.Run("Create {{.Name}}", func(t *testing.T) {
+	t.Run("Create", func(t *testing.T) {
 		w := httptest.NewRecorder()
-		body := map[string]interface{}{
-			"test_field": "test_value",
-		}
+		body := domain.{{.Model.Name | title}}{}
 		jsonBody, _ := json.Marshal(body)
-		req, _ := http.NewRequest("POST", "/api/{{.Name}}", bytes.NewBuffer(jsonBody))
-		req.Header.Set("Content-Type", "application/json")
-		{{if .Protected}}
-		req.Header.Set("Authorization", "Bearer mock-token")
-		{{end}}
+		req, _ := http.NewRequest("POST", "/{{.Model.Name | lower}}", bytes.NewBuffer(jsonBody))
 		r.ServeHTTP(w, req)
-
 		assert.Equal(t, http.StatusCreated, w.Code)
 	})
 
-	t.Run("List {{.Name}}", func(t *testing.T) {
+	t.Run("List", func(t *testing.T) {
 		w := httptest.NewRecorder()
-		req, _ := http.NewRequest("GET", "/api/{{.Name}}", nil)
-		{{if .Protected}}
-		req.Header.Set("Authorization", "Bearer mock-token")
-		{{end}}
+		req, _ := http.NewRequest("GET", "/{{.Model.Name | lower}}", nil)
 		r.ServeHTTP(w, req)
-
 		assert.Equal(t, http.StatusOK, w.Code)
 	})
 }
-{{end}}
 `
-	funcMap := template.FuncMap{
-		"title": func(s string) string {
-			if s == "" {
-				return ""
-			}
-			return strings.ToUpper(s[:1]) + s[1:]
-		},
+	data := struct {
+		ProjectName string
+		Model       domain.Model
+	}{
+		ProjectName: config.ProjectName,
+		Model:       model,
 	}
 
-	tmpl, err := template.New("test").Funcs(funcMap).Parse(testTemplate)
+	content, err := template.Render(model.Name+"_test", testTemplate, data)
 	if err != nil {
 		return err
 	}
-
-	f, err := os.Create(filepath.Join(projectPath, "cmd/api/handlers_test.go"))
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	return tmpl.Execute(f, config)
+	return fs.WriteFile(filepath.Join(projectPath, "internal/handlers", strings.ToLower(model.Name), "handler_test.go"), content)
 }
 
+func generateArchitectureDocs(projectPath string, fs domain.FileSystemPort) error {
+	const content = `# Architecture of Generated Project
 
-func generateSetupScript(projectPath string, config *parser.Config) error {
-	scriptPath := filepath.Join(projectPath, "setup.sh")
-	f, err := os.Create(scriptPath)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
+This project follows **Hexagonal Architecture** (also known as Ports and Adapters) and **Clean Code** principles. The goal is to separate the core business logic from external concerns like databases, APIs, and frameworks.
 
-	// Make script executable
-	if err := os.Chmod(scriptPath, 0755); err != nil {
-		return err
-	}
+## Directory Structure
 
-	// Write script content
-	fmt.Fprintf(f, "#!/bin/bash\n\n")
-	fmt.Fprintf(f, "echo \"[1/3] Installing dependencies...\"\n")
-	fmt.Fprintf(f, "go mod tidy\n\n")
+` + "```" + `
+<project_name>/
+├── cmd/
+│   └── api/
+│       └── main.go           # Entry point: wires everything together
+├── internal/
+│   ├── domain/               # Core business logic (Ports)
+│   │   ├── <model>.go        # Model struct and Repository interface
+│   ├── infrastructure/       # External concerns (Adapters)
+│   │   └── db/
+│   │       ├── firestore.go  # Base Firestore client
+│   │       └── <model>_repo.go # Firestore implementation of the Port
+│   ├── handlers/             # Application Layer (Adapters)
+│   │   ├── <model>/
+│   │   │   ├── handler.go    # HTTP handlers for the model
+│   │   │   └── handler_test.go # Unit tests for the handler
+│   │   └── auth/             # Authentication handlers
+│   ├── auth/                 # Auth logic and middleware
+│   ├── payments/             # Payment provider integrations (e.g., Mercado Pago)
+│   └── config/               # Configuration management
+├── docs/                     # Swagger documentation (auto-generated)
+├── setup.sh                  # One-click setup and run
+├── setup_and_test.sh         # Run server and execute integration tests
+└── update_docs.sh            # Re-generate Swagger documentation
+` + "```" + `
 
-	fmt.Fprintf(f, "if ! command -v swag &> /dev/null; then\n")
-	fmt.Fprintf(f, "    echo \"swag could not be found, installing...\"\n")
-	fmt.Fprintf(f, "    go install github.com/swaggo/swag/cmd/swag@latest\n")
-	fmt.Fprintf(f, "    export PATH=$PATH:$(go env GOPATH)/bin\n")
-	fmt.Fprintf(f, "fi\n\n")
+## Core Concepts
 
-	fmt.Fprintf(f, "echo \"[2/3] Generating docs...\"\n")
-	fmt.Fprintf(f, "./update_docs.sh\n\n")
+### 1. Hexagonal Architecture (Ports & Adapters)
 
-	fmt.Fprintf(f, "echo \"[3/3] Starting server...\"\n")
-	fmt.Fprintf(f, "echo \"Server will be available at http://localhost:8080\"\n")
-	fmt.Fprintf(f, "echo \"Swagger docs available at http://localhost:8080/swagger/index.html\"\n")
-	if config.Payments != nil && config.Payments.Enabled {
-		fmt.Fprintf(f, "export MP_ACCESS_TOKEN=\"YOUR_MERCADO_PAGO_ACCESS_TOKEN_HERE\"\n")
-	}
-	fmt.Fprintf(f, "go run cmd/api/main.go\n")
-	
-	return nil
+*   **Domain (The Core)**: Located in ` + "`" + `internal/domain` + "`" + `. It defines *what* the system does. It contains the data models (structs) and the interfaces (Ports) that the rest of the system must implement.
+*   **Infrastructure (Adapters)**: Located in ` + "`" + `internal/infrastructure` + "`" + `. It defines *how* the system interacts with the outside world. For example, the Firestore repository implements the domain's repository interface.
+*   **Handlers (Adapters)**: Located in ` + "`" + `internal/handlers` + "`" + `. These are the entry points for HTTP requests. They depend on the domain interfaces, not on specific implementations.
+
+### 2. Dependency Injection
+
+All dependencies are injected in ` + "`" + `cmd/api/main.go` + "`" + `. This makes the code highly testable and modular. For example, you can easily swap the Firestore repository for a PostgreSQL one without changing the handler logic.
+
+### 3. Clean Code & Guard Clauses
+
+The code is written to be readable and maintainable. We use **guard clauses** (early returns) to avoid nested ` + "`" + `if-else` + "`" + ` blocks, making the "happy path" easy to follow.
+
+### 4. Modular Handlers
+
+Each model has its own dedicated folder in ` + "`" + `internal/handlers` + "`" + `. This prevents the "God Object" anti-pattern and allows multiple developers to work on different models without merge conflicts.
+
+### 5. Automated Documentation
+
+We use ` + "`" + `swag` + "`" + ` to generate OpenAPI (Swagger) documentation from comments in the code. You can view the documentation at ` + "`" + `http://localhost:8080/swagger/index.html` + "`" + ` after starting the server.
+
+## How to Work with This Code
+
+1.  **Adding a Field**: Update the struct in ` + "`" + `internal/domain/<model>.go` + "`" + ` and the Firestore implementation in ` + "`" + `internal/infrastructure/db/<model>_repository.go` + "`" + `.
+2.  **Adding a Route**: Add the handler method in ` + "`" + `internal/handlers/<model>/handler.go` + "`" + ` and register it in ` + "`" + `cmd/api/main.go` + "`" + `.
+3.  **Testing**: Run ` + "`" + `go test ./...` + "`" + ` to execute all unit tests. Tests are co-located with handlers for convenience.
+4.  **Updating Docs**: Run ` + "`" + `./update_docs.sh` + "`" + ` after adding Swagger annotations to your handlers.
+`
+	return fs.WriteFile(filepath.Join(projectPath, "ARCHITECTURE.md"), []byte(content))
 }

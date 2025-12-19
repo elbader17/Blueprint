@@ -108,6 +108,19 @@ To update the documentation after making changes to the code (if you modify the 
 swag init -g cmd/api/main.go
 ```
 
+## Architecture
+
+The generated code follows **Hexagonal Architecture** (Ports and Adapters) and **Clean Code** principles. This ensures that the core business logic is decoupled from infrastructure concerns (like the database or the web framework).
+
+For a detailed explanation of the architecture, directory structure, and how to work with the generated code, see the **`ARCHITECTURE.md`** file inside your generated project.
+
+Key architectural features:
+- **Domain Layer**: Core models and repository interfaces (Ports).
+- **Infrastructure Layer**: Firestore implementations (Adapters).
+- **Application Layer**: HTTP handlers (Adapters) and dependency injection.
+- **Guard Clauses**: Clean, readable code without nested `if-else`.
+- **Modular Handlers**: Model-specific logic organized in dedicated folders.
+
 ## Blueprint Format
 
 The input file must contain a JSON code block with the following structure:
