@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/eduardo/blueprint/internal/domain"
@@ -591,12 +592,69 @@ func (r *{{.Model.Name | title}}Repository) Delete(ctx context.Context, id strin
 	case "mongodb":
 		repoTemplate = MongoRepoTemplate
 	}
+	var allFields []string
+	for k := range model.Fields {
+		allFields = append(allFields, k)
+	}
+	for k := range model.Relations {
+		allFields = append(allFields, k)
+	}
+	sort.Strings(allFields)
+
+	// Pre-calculate SQL parts for Postgres
+	var insertCols []string
+	var insertPlaceholders []string
+	var updateSet []string
+	var selectCols []string
+	var schemaCols []string
+
+	selectCols = append(selectCols, "id")
+	// ID column definition
+	schemaCols = append(schemaCols, "id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text")
+
+	for i, f := range allFields {
+		insertCols = append(insertCols, f)
+		insertPlaceholders = append(insertPlaceholders, fmt.Sprintf("$%d", i+1))
+		updateSet = append(updateSet, fmt.Sprintf("%s = $%d", f, i+1))
+		selectCols = append(selectCols, f)
+
+		// Map Go types to SQL types
+		sqlType := "TEXT"
+		if fieldType, ok := model.Fields[f]; ok {
+			switch fieldType {
+			case "int":
+				sqlType = "INTEGER"
+			case "float":
+				sqlType = "DOUBLE PRECISION"
+			case "bool":
+				sqlType = "BOOLEAN"
+			case "datetime":
+				sqlType = "TIMESTAMP"
+			}
+		}
+		schemaCols = append(schemaCols, fmt.Sprintf("%s %s", f, sqlType))
+	}
+
 	data := struct {
-		ProjectName string
-		Model       domain.Model
+		ProjectName        string
+		Model              domain.Model
+		Fields             []string // For struct generation/scanning if needed
+		InsertColumns      string
+		InsertPlaceholders string
+		UpdateSet          string
+		SelectColumns      string
+		CreateTableSQL     string
+		TotalFields        int
 	}{
-		ProjectName: config.ProjectName,
-		Model:       model,
+		ProjectName:        config.ProjectName,
+		Model:              model,
+		Fields:             allFields,
+		InsertColumns:      strings.Join(insertCols, ", "),
+		InsertPlaceholders: strings.Join(insertPlaceholders, ", "),
+		UpdateSet:          strings.Join(updateSet, ", "),
+		SelectColumns:      strings.Join(selectCols, ", "),
+		CreateTableSQL:     fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (%s)", model.Name, strings.Join(schemaCols, ", ")),
+		TotalFields:        len(allFields),
 	}
 
 	content, err := template.Render(model.Name+"_repo", repoTemplate, data)

@@ -5,7 +5,6 @@ const PostgresBaseTemplate = `package db
 import (
 	"context"
 	"fmt"
-	"log"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -67,7 +66,6 @@ const PostgresRepoTemplate = `package db
 import (
 	"context"
 	"fmt"
-	"strings"
 	"{{.ProjectName}}/internal/domain"
 )
 
@@ -76,11 +74,15 @@ type {{.Model.Name | title}}Repository struct {
 }
 
 func New{{.Model.Name | title}}Repository(repo *PostgresRepository) *{{.Model.Name | title}}Repository {
+	_, err := repo.Pool.Exec(context.Background(), "{{.CreateTableSQL}}")
+	if err != nil {
+		fmt.Printf("Error creating table {{.Model.Name}}: %v\n", err)
+	}
 	return &{{.Model.Name | title}}Repository{repo: repo}
 }
 
 func (r *{{.Model.Name | title}}Repository) List(ctx context.Context) ([]*domain.{{.Model.Name | title}}, error) {
-	rows, err := r.repo.Pool.Query(ctx, "SELECT id, {{range $k, $v := .Model.Fields}}{{$k}}, {{end}}{{range $k, $v := .Model.Relations}}{{$k}}, {{end}} FROM {{.Model.Name}}")
+	rows, err := r.repo.Pool.Query(ctx, "SELECT {{.SelectColumns}} FROM {{.Model.Name}}")
 	if err != nil {
 		return nil, err
 	}
@@ -89,14 +91,9 @@ func (r *{{.Model.Name | title}}Repository) List(ctx context.Context) ([]*domain
 	var results []*domain.{{.Model.Name | title}}
 	for rows.Next() {
 		var m domain.{{.Model.Name | title}}
-		// This is a simplified scan. In a real generator, we'd map fields carefully.
-		// For now, let's assume the order matches.
 		fields := []interface{}{&m.ID}
-		{{range $k, $v := .Model.Fields}}
-		fields = append(fields, &m.{{$k | pascal}})
-		{{end}}
-		{{range $k, $v := .Model.Relations}}
-		fields = append(fields, &m.{{$k | pascal}})
+		{{range $f := .Fields}}
+		fields = append(fields, &m.{{$f | pascal}})
 		{{end}}
 		
 		if err := rows.Scan(fields...); err != nil {
@@ -110,14 +107,11 @@ func (r *{{.Model.Name | title}}Repository) List(ctx context.Context) ([]*domain
 func (r *{{.Model.Name | title}}Repository) Get(ctx context.Context, id string) (*domain.{{.Model.Name | title}}, error) {
 	var m domain.{{.Model.Name | title}}
 	fields := []interface{}{&m.ID}
-	{{range $k, $v := .Model.Fields}}
-	fields = append(fields, &m.{{$k | pascal}})
-	{{end}}
-	{{range $k, $v := .Model.Relations}}
-	fields = append(fields, &m.{{$k | pascal}})
+	{{range $f := .Fields}}
+	fields = append(fields, &m.{{$f | pascal}})
 	{{end}}
 
-	query := "SELECT id, {{range $k, $v := .Model.Fields}}{{$k}}, {{end}}{{range $k, $v := .Model.Relations}}{{$k}}, {{end}} FROM {{.Model.Name}} WHERE id = $1"
+	query := "SELECT {{.SelectColumns}} FROM {{.Model.Name}} WHERE id = $1"
 	err := r.repo.Pool.QueryRow(ctx, query, id).Scan(fields...)
 	if err != nil {
 		return nil, err
@@ -126,12 +120,10 @@ func (r *{{.Model.Name | title}}Repository) Get(ctx context.Context, id string) 
 }
 
 func (r *{{.Model.Name | title}}Repository) Create(ctx context.Context, m *domain.{{.Model.Name | title}}) (string, error) {
-	query := "INSERT INTO {{.Model.Name}} ({{range $k, $v := .Model.Fields}}{{$k}}, {{end}}{{range $k, $v := .Model.Relations}}{{$k}}, {{end}}) VALUES ({{range $i, $k := .Model.Fields}}${{add $i 1}}, {{end}}{{range $i, $k := .Model.Relations}}${{add (add $i (len $.Model.Fields)) 1}}, {{end}}) RETURNING id"
+	query := "INSERT INTO {{.Model.Name}} ({{.InsertColumns}}) VALUES ({{.InsertPlaceholders}}) RETURNING id"
 	
 	values := []interface{}{
-		{{range $k, $v := .Model.Fields}}m.{{$k | pascal}},
-		{{end}}
-		{{range $k, $v := .Model.Relations}}m.{{$k | pascal}},
+		{{range $f := .Fields}}m.{{$f | pascal}},
 		{{end}}
 	}
 
@@ -144,12 +136,10 @@ func (r *{{.Model.Name | title}}Repository) Create(ctx context.Context, m *domai
 }
 
 func (r *{{.Model.Name | title}}Repository) Update(ctx context.Context, id string, m *domain.{{.Model.Name | title}}) error {
-	query := "UPDATE {{.Model.Name}} SET {{range $i, $k := .Model.Fields}}{{$k}} = ${{add $i 1}}, {{end}}{{range $i, $k := .Model.Relations}}{{$k}} = ${{add (add $i (len $.Model.Fields)) 1}}, {{end}} WHERE id = ${{add (add (len $.Model.Fields) (len $.Model.Relations)) 1}}"
+	query := "UPDATE {{.Model.Name}} SET {{.UpdateSet}} WHERE id = ${{add .TotalFields 1}}"
 	
 	values := []interface{}{
-		{{range $k, $v := .Model.Fields}}m.{{$k | pascal}},
-		{{end}}
-		{{range $k, $v := .Model.Relations}}m.{{$k | pascal}},
+		{{range $f := .Fields}}m.{{$f | pascal}},
 		{{end}}
 		id,
 	}
