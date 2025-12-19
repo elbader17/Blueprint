@@ -37,6 +37,9 @@ func (t *GoTemplateEngine) Render(name, tmpl string, data interface{}) ([]byte, 
 			}
 			return strings.Join(parts, "")
 		},
+		"add": func(a, b int) int {
+			return a + b
+		},
 	}
 
 	tObj, err := template.New(name).Funcs(funcMap).Parse(tmpl)

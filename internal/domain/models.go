@@ -3,10 +3,18 @@ package domain
 // Config represents the top-level structure of the blueprint JSON
 type Config struct {
 	ProjectName        string    `json:"project_name"`
-	FirestoreProjectID string    `json:"firestore_project_id"`
+	Database           Database  `json:"database"`
+	FirestoreProjectID string    `json:"firestore_project_id,omitempty"` // Deprecated: use Database.ProjectID
 	Auth               *Auth     `json:"auth,omitempty"`
 	Payments           *Payments `json:"payments,omitempty"`
 	Models             []Model   `json:"models"`
+}
+
+// Database configures the database driver
+type Database struct {
+	Type      string `json:"type"`       // "firestore", "postgresql", "mongodb"
+	ProjectID string `json:"project_id,omitempty"` // For Firestore
+	URL       string `json:"url,omitempty"`        // For Postgres/Mongo
 }
 
 // Auth configures the authentication module

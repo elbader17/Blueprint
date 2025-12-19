@@ -39,5 +39,13 @@ func (p *MarkdownParser) Parse(filename string) (*domain.Config, error) {
 		return nil, fmt.Errorf("failed to parse JSON: %w", err)
 	}
 
+	// Default to Firestore if no database is specified
+	if config.Database.Type == "" {
+		config.Database.Type = "firestore"
+		if config.Database.ProjectID == "" {
+			config.Database.ProjectID = config.FirestoreProjectID
+		}
+	}
+
 	return &config, nil
 }

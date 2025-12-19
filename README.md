@@ -135,7 +135,11 @@ System architecture definition.
 ` + "```" + `json
 {
   "project_name": "ShopMasterAPI",
-  "firestore_project_id": "shop-master-prod",
+  "database": {
+    "type": "firestore",
+    "project_id": "shop-master-prod"
+  },
+  "auth": {
     "enabled": true,
     "user_collection": "users"
   },
@@ -178,7 +182,10 @@ System architecture definition.
 ### Field Explanation
 
 - **`project_name`**: Name of the folder and Go module that will be generated.
-- **`firestore_project_id`**: Your Firebase Project ID (obtained in the credentials step).
+- **`database`**: Configuration for the database driver.
+    - `type`: One of `firestore`, `postgresql`, or `mongodb`.
+    - `project_id`: (Firestore only) Your Firebase Project ID.
+    - `url`: (Postgres/Mongo only) Connection string (e.g., `postgres://user:pass@localhost:5432/db`).
 - **`auth`** (Optional):
     - `enabled`: `true` to activate the login/register system.
     - `user_collection`: Name of the Firestore collection where users will be stored (e.g., "users").

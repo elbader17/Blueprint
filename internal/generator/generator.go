@@ -81,11 +81,11 @@ func Generate(config *domain.Config, outputDir string, fs domain.FileSystemPort,
 		return err
 	}
 
-	if err := generateGoMod(projectPath, config.ProjectName, fs); err != nil {
+	if err := generateGoMod(projectPath, config, fs); err != nil {
 		return err
 	}
 
-	if err := generateFirestore(projectPath, config, fs, template); err != nil {
+	if err := generateDatabase(projectPath, config, fs, template); err != nil {
 		return err
 	}
 
@@ -183,22 +183,63 @@ func generateScripts(projectPath string, config *domain.Config, fs domain.FileSy
 	return generateDocsScript(projectPath, fs)
 }
 
-func generateGoMod(projectPath, projectName string, fs domain.FileSystemPort) error {
+func generateGoMod(projectPath string, config *domain.Config, fs domain.FileSystemPort) error {
+	var deps []string
+	deps = append(deps, "github.com/gin-gonic/gin v1.9.1")
+	deps = append(deps, "github.com/swaggo/files v1.0.1")
+	deps = append(deps, "github.com/swaggo/gin-swagger v1.6.0")
+	deps = append(deps, "github.com/swaggo/swag v1.16.2")
+	deps = append(deps, "github.com/stretchr/testify v1.8.4")
+
+	switch config.Database.Type {
+	case "firestore":
+		deps = append(deps, "cloud.google.com/go/firestore v1.14.0")
+		deps = append(deps, "firebase.google.com/go/v4 v4.13.0")
+		deps = append(deps, "google.golang.org/api v0.150.0")
+	case "postgresql":
+		deps = append(deps, "github.com/jackc/pgx/v5 v5.5.0")
+	case "mongodb":
+		deps = append(deps, "go.mongodb.org/mongo-driver v1.13.0")
+	}
+
 	content := fmt.Sprintf(`module %s
 
 go 1.21
 
 require (
-	cloud.google.com/go/firestore v1.14.0
-	firebase.google.com/go/v4 v4.13.0
-	github.com/gin-gonic/gin v1.9.1
-	google.golang.org/api v0.150.0
-	github.com/swaggo/files v1.0.1
-	github.com/swaggo/gin-swagger v1.6.0
-	github.com/swaggo/swag v1.16.2
+	%s
 )
-`, projectName)
+`, config.ProjectName, strings.Join(deps, "\n\t"))
 	return fs.WriteFile(filepath.Join(projectPath, "go.mod"), []byte(content))
+}
+
+func generateDatabase(projectPath string, config *domain.Config, fs domain.FileSystemPort, template domain.TemplatePort) error {
+	switch config.Database.Type {
+	case "firestore":
+		return generateFirestore(projectPath, config, fs, template)
+	case "postgresql":
+		return generatePostgres(projectPath, config, fs, template)
+	case "mongodb":
+		return generateMongo(projectPath, config, fs, template)
+	default:
+		return fmt.Errorf("unsupported database type: %s", config.Database.Type)
+	}
+}
+
+func generatePostgres(projectPath string, config *domain.Config, fs domain.FileSystemPort, template domain.TemplatePort) error {
+	content, err := template.Render("postgres_base", PostgresBaseTemplate, config)
+	if err != nil {
+		return err
+	}
+	return fs.WriteFile(filepath.Join(projectPath, "internal/infrastructure/db/postgres.go"), content)
+}
+
+func generateMongo(projectPath string, config *domain.Config, fs domain.FileSystemPort, template domain.TemplatePort) error {
+	content, err := template.Render("mongo_base", MongoBaseTemplate, config)
+	if err != nil {
+		return err
+	}
+	return fs.WriteFile(filepath.Join(projectPath, "internal/infrastructure/db/mongo.go"), content)
 }
 
 func generateFirestore(projectPath string, config *domain.Config, fs domain.FileSystemPort, template domain.TemplatePort) error {
@@ -474,7 +515,10 @@ func generateAuthFiles(projectPath string, config *domain.Config, fs domain.File
 }
 
 func generateModelRepository(projectPath string, config *domain.Config, model domain.Model, fs domain.FileSystemPort, template domain.TemplatePort) error {
-	const repoTemplate = `package db
+	var repoTemplate string
+	switch config.Database.Type {
+	case "firestore":
+		repoTemplate = `package db
 
 import (
 	"context"
@@ -542,6 +586,11 @@ func (r *{{.Model.Name | title}}Repository) Delete(ctx context.Context, id strin
 	return err
 }
 `
+	case "postgresql":
+		repoTemplate = PostgresRepoTemplate
+	case "mongodb":
+		repoTemplate = MongoRepoTemplate
+	}
 	data := struct {
 		ProjectName string
 		Model       domain.Model
@@ -586,7 +635,13 @@ import (
 
 func main() {
 	// Initialize Database
+	{{if eq .Database.Type "firestore"}}
 	baseRepo, err := db.NewFirestoreRepository()
+	{{else if eq .Database.Type "postgresql"}}
+	baseRepo, err := db.NewPostgresRepository(os.Getenv("DATABASE_URL"))
+	{{else if eq .Database.Type "mongodb"}}
+	baseRepo, err := db.NewMongoRepository(os.Getenv("DATABASE_URL"), "{{.ProjectName}}")
+	{{end}}
 	if err != nil {
 		log.Fatalf("Failed to initialize database: %v", err)
 	}
@@ -600,7 +655,7 @@ func main() {
 		authSvc = &authService.MockAuthService{}
 	} else {
 		// Initialize Firebase Auth
-		app, err := firebase.NewApp(context.Background(), &firebase.Config{ProjectID: "{{.FirestoreProjectID}}"})
+		app, err := firebase.NewApp(context.Background(), &firebase.Config{ProjectID: "{{.Database.ProjectID}}"})
 		if err != nil {
 			log.Fatalf("error initializing app: %v\n", err)
 		}
@@ -612,13 +667,25 @@ func main() {
 	}
 
 	// Initialize User Handler
+	{{if eq .Database.Type "firestore"}}
 	userRepo := db.New{{.Auth.UserCollection | title}}Repository(baseRepo.(*db.FirestoreRepository))
+	{{else if eq .Database.Type "postgresql"}}
+	userRepo := db.New{{.Auth.UserCollection | title}}Repository(baseRepo.(*db.PostgresRepository))
+	{{else if eq .Database.Type "mongodb"}}
+	userRepo := db.New{{.Auth.UserCollection | title}}Repository(baseRepo.(*db.MongoRepository))
+	{{end}}
 	userHdl := authHandler.NewUserHandler(authSvc, userRepo, "{{.Auth.UserCollection}}")
 	{{end}}
 
 	{{if and .Payments .Payments.Enabled}}
 	// Initialize Payment Service
+	{{if eq .Database.Type "firestore"}}
 	mpRepo := db.New{{.Payments.TransactionsColl | title}}Repository(baseRepo.(*db.FirestoreRepository))
+	{{else if eq .Database.Type "postgresql"}}
+	mpRepo := db.New{{.Payments.TransactionsColl | title}}Repository(baseRepo.(*db.PostgresRepository))
+	{{else if eq .Database.Type "mongodb"}}
+	mpRepo := db.New{{.Payments.TransactionsColl | title}}Repository(baseRepo.(*db.MongoRepository))
+	{{end}}
 	mpService := payments.NewMercadoPagoService(mpRepo)
 	{{end}}
 
@@ -647,7 +714,13 @@ func main() {
 	{{range .Models}}
 	// Routes for {{.Name}}
 	{
+		{{if eq $.Database.Type "firestore"}}
 		repo := db.New{{.Name | title}}Repository(baseRepo.(*db.FirestoreRepository))
+		{{else if eq $.Database.Type "postgresql"}}
+		repo := db.New{{.Name | title}}Repository(baseRepo.(*db.PostgresRepository))
+		{{else if eq $.Database.Type "mongodb"}}
+		repo := db.New{{.Name | title}}Repository(baseRepo.(*db.MongoRepository))
+		{{end}}
 		handler := {{.Name | lower}}.New{{.Name | title}}Handler(repo)
 
 		group := r.Group("/api/{{.Name}}")
@@ -912,7 +985,7 @@ func Test{{.Model.Name | title}}Handler(t *testing.T) {
 func generateArchitectureDocs(projectPath string, fs domain.FileSystemPort) error {
 	const content = `# Architecture of Generated Project
 
-This project follows **Hexagonal Architecture** (also known as Ports and Adapters) and **Clean Code** principles. The goal is to separate the core business logic from external concerns like databases, APIs, and frameworks.
+This project follows **Hexagonal Architecture** (also known as Ports and Adapters) and **Clean Code** principles. It supports multiple database drivers (Firestore, PostgreSQL, MongoDB) through a unified repository interface.
 
 ## Directory Structure
 
@@ -926,52 +999,46 @@ This project follows **Hexagonal Architecture** (also known as Ports and Adapter
 │   │   ├── <model>.go        # Model struct and Repository interface
 │   ├── infrastructure/       # External concerns (Adapters)
 │   │   └── db/
-│   │       ├── firestore.go  # Base Firestore client
-│   │       └── <model>_repo.go # Firestore implementation of the Port
+│   │       ├── firestore.go  # Firestore client (if selected)
+│   │       ├── postgres.go   # PostgreSQL client (if selected)
+│   │       ├── mongo.go      # MongoDB client (if selected)
+│   │       └── <model>_repo.go # DB-specific implementation of the Port
 │   ├── handlers/             # Application Layer (Adapters)
 │   │   ├── <model>/
 │   │   │   ├── handler.go    # HTTP handlers for the model
 │   │   │   └── handler_test.go # Unit tests for the handler
 │   │   └── auth/             # Authentication handlers
 │   ├── auth/                 # Auth logic and middleware
-│   ├── payments/             # Payment provider integrations (e.g., Mercado Pago)
+│   ├── payments/             # Payment provider integrations
 │   └── config/               # Configuration management
-├── docs/                     # Swagger documentation (auto-generated)
-├── setup.sh                  # One-click setup and run
-├── setup_and_test.sh         # Run server and execute integration tests
-└── update_docs.sh            # Re-generate Swagger documentation
+└── ...
 ` + "```" + `
 
 ## Core Concepts
 
-### 1. Hexagonal Architecture (Ports & Adapters)
+### 1. Database Abstraction
 
-*   **Domain (The Core)**: Located in ` + "`" + `internal/domain` + "`" + `. It defines *what* the system does. It contains the data models (structs) and the interfaces (Ports) that the rest of the system must implement.
-*   **Infrastructure (Adapters)**: Located in ` + "`" + `internal/infrastructure` + "`" + `. It defines *how* the system interacts with the outside world. For example, the Firestore repository implements the domain's repository interface.
-*   **Handlers (Adapters)**: Located in ` + "`" + `internal/handlers` + "`" + `. These are the entry points for HTTP requests. They depend on the domain interfaces, not on specific implementations.
+The project uses a **Repository Pattern** to abstract database operations. The domain layer defines interfaces (Ports), and the infrastructure layer provides implementations (Adapters) for the selected database:
+
+- **Firestore**: Uses the official Google Cloud Firestore SDK.
+- **PostgreSQL**: Uses ` + "`" + `pgx` + "`" + ` for high-performance SQL operations.
+- **MongoDB**: Uses the official MongoDB Go driver.
 
 ### 2. Dependency Injection
 
-All dependencies are injected in ` + "`" + `cmd/api/main.go` + "`" + `. This makes the code highly testable and modular. For example, you can easily swap the Firestore repository for a PostgreSQL one without changing the handler logic.
+All dependencies are injected in ` + "`" + `cmd/api/main.go` + "`" + `. The database client is initialized based on the configuration and passed to the model-specific repositories.
 
 ### 3. Clean Code & Guard Clauses
 
-The code is written to be readable and maintainable. We use **guard clauses** (early returns) to avoid nested ` + "`" + `if-else` + "`" + ` blocks, making the "happy path" easy to follow.
-
-### 4. Modular Handlers
-
-Each model has its own dedicated folder in ` + "`" + `internal/handlers` + "`" + `. This prevents the "God Object" anti-pattern and allows multiple developers to work on different models without merge conflicts.
-
-### 5. Automated Documentation
-
-We use ` + "`" + `swag` + "`" + ` to generate OpenAPI (Swagger) documentation from comments in the code. You can view the documentation at ` + "`" + `http://localhost:8080/swagger/index.html` + "`" + ` after starting the server.
+The code uses **guard clauses** to keep the logic flat and readable, avoiding deep nesting.
 
 ## How to Work with This Code
 
-1.  **Adding a Field**: Update the struct in ` + "`" + `internal/domain/<model>.go` + "`" + ` and the Firestore implementation in ` + "`" + `internal/infrastructure/db/<model>_repository.go` + "`" + `.
-2.  **Adding a Route**: Add the handler method in ` + "`" + `internal/handlers/<model>/handler.go` + "`" + ` and register it in ` + "`" + `cmd/api/main.go` + "`" + `.
-3.  **Testing**: Run ` + "`" + `go test ./...` + "`" + ` to execute all unit tests. Tests are co-located with handlers for convenience.
-4.  **Updating Docs**: Run ` + "`" + `./update_docs.sh` + "`" + ` after adding Swagger annotations to your handlers.
+1.  **Switching Databases**: To change the database, you would typically update the initialization in ` + "`" + `main.go` + "`" + ` and provide the corresponding repository implementation in ` + "`" + `internal/infrastructure/db` + "`" + `.
+2.  **Adding a Field**: Update the domain struct and the repository implementation.
+3.  **Environment Variables**:
+    - ` + "`" + `DATABASE_URL` + "`" + `: Required for PostgreSQL and MongoDB.
+    - ` + "`" + `MOCK_AUTH` + "`" + `: Set to ` + "`" + `true` + "`" + ` to bypass Firebase Auth during development.
 `
 	return fs.WriteFile(filepath.Join(projectPath, "ARCHITECTURE.md"), []byte(content))
 }
