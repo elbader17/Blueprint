@@ -1,6 +1,6 @@
 # Blueprint Generator
 
-Blueprint is a CLI tool written in Go that automatically generates a complete RESTful API using the **Gin Framework** and **Firestore**. It allows you to define your database structure and authentication configuration in a simple Markdown file, and the tool takes care of creating all the necessary code.
+A powerful tool to generate Go API projects from a simple markdown blueprint.
 
 ## Features
 
@@ -12,6 +12,7 @@ Blueprint is a CLI tool written in Go that automatically generates a complete RE
 - 💳 **Mercado Pago Integration**: Easily enable payments and transaction tracking.
 - 📚 **Swagger Docs**: Automatically generates Swagger documentation for your API.
 - 📄 **Simple Configuration**: Everything is defined in a single `blueprint.md` file.
+- 🖥️ **Interactive TUI**: Visual wizard to create your blueprint.
 
 ## Prerequisites
 
@@ -20,13 +21,38 @@ Blueprint is a CLI tool written in Go that automatically generates a complete RE
 
 ## Installation
 
-Clone the repository and build the generator:
+Clone the repository and build the generator using the provided Makefile:
 
 ```bash
 git clone https://github.com/elbader17/Blueprint
 cd Blueprint
-go mod tidy
-go build -o blueprint_gen cmd/blueprint/main.go
+make build
+```
+
+This will download dependencies and build the `blueprint_gen` binary.
+
+## Usage
+
+### Interactive Mode (Recommended)
+
+Run the generator without arguments to launch the interactive Terminal User Interface (TUI):
+
+```bash
+./blueprint_gen
+```
+
+The interactive wizard will guide you through:
+1.  **Project Setup**: Define project name and database type (Firestore, PostgreSQL, MongoDB).
+2.  **Authentication**: Enable authentication and configure user collection.
+3.  **Models**: Create data models with fields and types.
+4.  **Relations**: Define relationships between models (e.g., `author` -> `User`).
+
+### Manual Mode
+
+You can also provide an existing blueprint file directly:
+
+```bash
+./blueprint_gen blueprint.md
 ```
 
 ## Getting Credentials
@@ -58,55 +84,6 @@ If you enable the `payments` module, you need a Mercado Pago Access Token.
 5. In your generated project, you can:
    - Set it as an environment variable: `export MP_ACCESS_TOKEN=your_token_here`
    - Or modify the `setup.sh` file before running it.
-
-## Usage
-
-1. Create a `blueprint.md` file with your API definition (see example below).
-2. Run the generator passing the file as an argument:
-
-```bash
-./blueprint_gen blueprint.md
-```
-
-3. The generator will:
-   - Create the project structure.
-   - Install dependencies.
-   - Generate Swagger documentation.
-   - **Automatically start the API server**.
-
-4. You will see the server logs in your terminal. You can stop it with `Ctrl+C`.
-
-## Manual Run
-
-If you want to run the API manually later:
-
-```bash
-cd ShopMasterAPI
-go run cmd/api/main.go
-```
-
-## Testing
-
-The generator automatically creates unit tests for your endpoints. To run them:
-
-```bash
-cd ShopMasterAPI
-go test ./...
-```
-
-## Documentation (Swagger)
-
-The API comes with auto-generated Swagger documentation.
-
-1. Run the API.
-2. Open your browser and navigate to:
-   `http://localhost:8080/swagger/index.html`
-
-To update the documentation after making changes to the code (if you modify the generated code manually):
-
-```bash
-swag init -g cmd/api/main.go
-```
 
 ## Architecture
 

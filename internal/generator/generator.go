@@ -129,7 +129,54 @@ func Generate(config *domain.Config, outputDir string, fs domain.FileSystemPort,
 		return err
 	}
 
+	if err := generateMakefile(projectPath, config, fs, template); err != nil {
+		return err
+	}
+
 	return nil
+}
+
+func generateMakefile(projectPath string, config *domain.Config, fs domain.FileSystemPort, template domain.TemplatePort) error {
+	const makefileTemplate = `PROJECT_ID ?= {{.Database.ProjectID}}
+REGION ?= us-central1
+SERVICE_NAME ?= {{.ProjectName}}
+IMAGE_NAME ?= gcr.io/$(PROJECT_ID)/$(SERVICE_NAME)
+
+.PHONY: run build test docker-build docker-push deploy
+
+run:
+	go run cmd/api/main.go
+
+build:
+	go build -o bin/api cmd/api/main.go
+
+test:
+	go test ./...
+
+docker-build:
+	docker build -t $(IMAGE_NAME) .
+
+docker-push:
+	docker push $(IMAGE_NAME)
+
+deploy:
+	gcloud run deploy $(SERVICE_NAME) \
+		--image $(IMAGE_NAME) \
+		--region $(REGION) \
+		--platform managed \
+		--allow-unauthenticated \
+		--project $(PROJECT_ID)
+`
+	// Fallback if ProjectID is empty (e.g. for Postgres/Mongo if not specified)
+	if config.Database.ProjectID == "" {
+		config.Database.ProjectID = "your-project-id"
+	}
+
+	content, err := template.Render("makefile", makefileTemplate, config)
+	if err != nil {
+		return err
+	}
+	return fs.WriteFile(filepath.Join(projectPath, "Makefile"), content)
 }
 
 func createDirectories(projectPath string, config *domain.Config, fs domain.FileSystemPort) error {

@@ -26,9 +26,15 @@ func main() {
 	blueprintService := application.NewBlueprintService(fs, templateEngine, markdownParser, generator.Generate)
 
 	// 3. Parse and Generate
-	filename := "blueprint.md"
+	var filename string
 	if len(os.Args) > 1 {
 		filename = os.Args[1]
+	} else {
+		var err error
+		filename, err = runInteractiveMode()
+		if err != nil {
+			log.Fatalf("Interactive mode failed: %v", err)
+		}
 	}
 
 	outputDir, err := os.Getwd()
