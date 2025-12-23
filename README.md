@@ -1,4 +1,4 @@
-# Blueprint Generator
+# blueprint.cli
 
 A powerful tool to generate Go API projects from a simple markdown blueprint.
 
