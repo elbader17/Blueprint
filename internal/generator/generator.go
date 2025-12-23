@@ -129,6 +129,10 @@ func Generate(config *domain.Config, outputDir string, fs domain.FileSystemPort,
 		return err
 	}
 
+	if err := generateDocsPlaceholder(projectPath, config, fs); err != nil {
+		return err
+	}
+
 	if err := generateMakefile(projectPath, config, fs, template); err != nil {
 		return err
 	}
@@ -418,7 +422,7 @@ type {{.Model.Name | title}} struct {
 	{{$k | pascal}} {{if eq $v "string"}}string{{else if eq $v "integer"}}int{{else if eq $v "float"}}float64{{else if eq $v "boolean"}}bool{{else}}interface{}{{end}} ` + "`" + `json:"{{$k}}"` + "`" + `
 	{{end}}
 	{{range $k, $v := .Model.Relations}}
-	{{$k | pascal}} string ` + "`" + `json:"{{$k}}"` + "`" + `
+	{{$k | pascal}} {{if hasPrefix $v "hasMany"}}[]string{{else}}string{{end}} ` + "`" + `json:"{{$k}}"` + "`" + `
 	{{end}}
 }
 
@@ -679,6 +683,12 @@ func (r *{{.Model.Name | title}}Repository) Delete(ctx context.Context, id strin
 				sqlType = "TIMESTAMP"
 			}
 		}
+		// Check for relations
+		if relationType, ok := model.Relations[f]; ok {
+			if strings.HasPrefix(relationType, "hasMany") {
+				sqlType = "TEXT[]"
+			}
+		}
 		schemaCols = append(schemaCols, fmt.Sprintf("%s %s", f, sqlType))
 	}
 
@@ -717,6 +727,7 @@ func generateMain(projectPath string, config *domain.Config, fs domain.FileSyste
 import (
 	{{if and .Auth .Auth.Enabled}}"context"{{end}}
 	"log"
+	"net/http"
 	"os"
 	{{if not (and .Auth .Auth.Enabled)}}"strings"{{end}}
 

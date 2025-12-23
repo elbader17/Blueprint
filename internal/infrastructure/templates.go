@@ -40,6 +40,9 @@ func (t *GoTemplateEngine) Render(name, tmpl string, data interface{}) ([]byte, 
 		"add": func(a, b int) int {
 			return a + b
 		},
+		"hasPrefix": func(s, prefix string) bool {
+			return strings.HasPrefix(s, prefix)
+		},
 	}
 
 	tObj, err := template.New(name).Funcs(funcMap).Parse(tmpl)
