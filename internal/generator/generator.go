@@ -137,6 +137,10 @@ func Generate(config *domain.Config, outputDir string, fs domain.FileSystemPort,
 		return err
 	}
 
+	if err := generateEnvFile(projectPath, config, fs); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -242,6 +246,7 @@ func generateGoMod(projectPath string, config *domain.Config, fs domain.FileSyst
 	deps = append(deps, "github.com/swaggo/gin-swagger v1.6.0")
 	deps = append(deps, "github.com/swaggo/swag v1.16.2")
 	deps = append(deps, "github.com/stretchr/testify v1.8.4")
+	deps = append(deps, "github.com/joho/godotenv v1.5.1")
 
 	switch config.Database.Type {
 	case "firestore":
@@ -721,6 +726,26 @@ func (r *{{.Model.Name | title}}Repository) Delete(ctx context.Context, id strin
 	return fs.WriteFile(filepath.Join(projectPath, "internal/infrastructure/db", strings.ToLower(model.Name)+"_repository.go"), content)
 }
 
+func generateEnvFile(projectPath string, config *domain.Config, fs domain.FileSystemPort) error {
+	var buffer bytes.Buffer
+
+	buffer.WriteString("PORT=8080\n")
+
+	if config.Database.Type == "postgresql" || config.Database.Type == "mongodb" {
+		buffer.WriteString("DATABASE_URL=your_database_url_here\n")
+	}
+
+	if config.Auth != nil && config.Auth.Enabled {
+		buffer.WriteString("MOCK_AUTH=false\n")
+	}
+
+	if config.Payments != nil && config.Payments.Enabled {
+		buffer.WriteString("MP_ACCESS_TOKEN=your_mercadopago_access_token_here\n")
+	}
+
+	return fs.WriteFile(filepath.Join(projectPath, ".env"), buffer.Bytes())
+}
+
 func generateMain(projectPath string, config *domain.Config, fs domain.FileSystemPort, template domain.TemplatePort) error {
 	const mainTemplate = `package main
 
@@ -731,6 +756,7 @@ import (
 	"os"
 	{{if not (and .Auth .Auth.Enabled)}}"strings"{{end}}
 
+	"github.com/joho/godotenv"
 	"{{.ProjectName}}/internal/infrastructure/db"
 	"github.com/gin-gonic/gin"
 	swaggerFiles "github.com/swaggo/files"
@@ -750,6 +776,11 @@ import (
 )
 
 func main() {
+	// Load .env file
+	if err := godotenv.Load(); err != nil {
+		log.Println("No .env file found")
+	}
+
 	// Initialize Database
 	{{if eq .Database.Type "firestore"}}
 	baseRepo, err := db.NewFirestoreRepository()
