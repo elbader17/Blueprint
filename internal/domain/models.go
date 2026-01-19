@@ -6,8 +6,14 @@ type Config struct {
 	Database           Database  `json:"database"`
 	FirestoreProjectID string    `json:"firestore_project_id,omitempty"` // Deprecated: use Database.ProjectID
 	Auth               *Auth     `json:"auth,omitempty"`
-	Payments           *Payments `json:"payments,omitempty"`
-	Models             []Model   `json:"models"`
+	Payments           *Payments   `json:"payments,omitempty"`
+	Pagination         *Pagination `json:"pagination,omitempty"`
+	Models             []Model     `json:"models"`
+}
+
+// Pagination configures the default pagination settings
+type Pagination struct {
+	DefaultLimit int `json:"default_limit"`
 }
 
 // Database configures the database driver

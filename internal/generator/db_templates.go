@@ -81,8 +81,8 @@ func New{{.Model.Name | title}}Repository(repo *PostgresRepository) *{{.Model.Na
 	return &{{.Model.Name | title}}Repository{repo: repo}
 }
 
-func (r *{{.Model.Name | title}}Repository) List(ctx context.Context) ([]*domain.{{.Model.Name | title}}, error) {
-	rows, err := r.repo.Pool.Query(ctx, "SELECT {{.SelectColumns}} FROM {{.Model.Name}}")
+func (r *{{.Model.Name | title}}Repository) List(ctx context.Context, limit, offset int) ([]*domain.{{.Model.Name | title}}, error) {
+	rows, err := r.repo.Pool.Query(ctx, "SELECT {{.SelectColumns}} FROM {{.Model.Name}} LIMIT $1 OFFSET $2", limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -245,6 +245,7 @@ import (
 	"{{.ProjectName}}/internal/domain"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
 type {{.Model.Name | title}}Repository struct {
@@ -255,8 +256,9 @@ func New{{.Model.Name | title}}Repository(repo *MongoRepository) *{{.Model.Name 
 	return &{{.Model.Name | title}}Repository{repo: repo}
 }
 
-func (r *{{.Model.Name | title}}Repository) List(ctx context.Context) ([]*domain.{{.Model.Name | title}}, error) {
-	cursor, err := r.repo.DB.Collection("{{.Model.Name}}").Find(ctx, bson.M{})
+func (r *{{.Model.Name | title}}Repository) List(ctx context.Context, limit, offset int) ([]*domain.{{.Model.Name | title}}, error) {
+	opts := options.Find().SetLimit(int64(limit)).SetSkip(int64(offset))
+	cursor, err := r.repo.DB.Collection("{{.Model.Name}}").Find(ctx, bson.M{}, opts)
 	if err != nil {
 		return nil, err
 	}

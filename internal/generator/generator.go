@@ -432,7 +432,7 @@ type {{.Model.Name | title}} struct {
 }
 
 type {{.Model.Name | title}}Repository interface {
-	List(ctx context.Context) ([]*{{.Model.Name | title}}, error)
+	List(ctx context.Context, limit, offset int) ([]*{{.Model.Name | title}}, error)
 	Get(ctx context.Context, id string) (*{{.Model.Name | title}}, error)
 	Create(ctx context.Context, model *{{.Model.Name | title}}) (string, error)
 	Update(ctx context.Context, id string, model *{{.Model.Name | title}}) error
@@ -459,6 +459,7 @@ func generateModelHandlers(projectPath string, config *domain.Config, model doma
 
 import (
 	"net/http"
+	"strconv"
 	"{{.ProjectName}}/internal/domain"
 	"github.com/gin-gonic/gin"
 )
@@ -472,7 +473,21 @@ func New{{.Model.Name | title}}Handler(repo domain.{{.Model.Name | title}}Reposi
 }
 
 func (h *{{.Model.Name | title}}Handler) List(c *gin.Context) {
-	results, err := h.repo.List(c.Request.Context())
+	limit := {{if .DefaultLimit}}{{.DefaultLimit}}{{else}}10{{end}}
+	if l := c.Query("limit"); l != "" {
+		if val, err := strconv.Atoi(l); err == nil && val > 0 {
+			limit = val
+		}
+	}
+	page := 1
+	if p := c.Query("page"); p != "" {
+		if val, err := strconv.Atoi(p); err == nil && val > 0 {
+			page = val
+		}
+	}
+	offset := (page - 1) * limit
+
+	results, err := h.repo.List(c.Request.Context(), limit, offset)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -529,11 +544,16 @@ func (h *{{.Model.Name | title}}Handler) Delete(c *gin.Context) {
 }
 `
 	data := struct {
-		ProjectName string
-		Model       domain.Model
+		ProjectName  string
+		Model        domain.Model
+		DefaultLimit int
 	}{
-		ProjectName: config.ProjectName,
-		Model:       model,
+		ProjectName:  config.ProjectName,
+		Model:        model,
+		DefaultLimit: 10,
+	}
+	if config.Pagination != nil && config.Pagination.DefaultLimit > 0 {
+		data.DefaultLimit = config.Pagination.DefaultLimit
 	}
 
 	content, err := template.Render(model.Name+"_handler", handlerTemplate, data)
@@ -591,8 +611,8 @@ func New{{.Model.Name | title}}Repository(client *FirestoreRepository) *{{.Model
 	return &{{.Model.Name | title}}Repository{client: client}
 }
 
-func (r *{{.Model.Name | title}}Repository) List(ctx context.Context) ([]*domain.{{.Model.Name | title}}, error) {
-	iter := r.client.client.Collection("{{.Model.Name}}").Documents(ctx)
+func (r *{{.Model.Name | title}}Repository) List(ctx context.Context, limit, offset int) ([]*domain.{{.Model.Name | title}}, error) {
+	iter := r.client.client.Collection("{{.Model.Name}}").Offset(offset).Limit(limit).Documents(ctx)
 	var results []*domain.{{.Model.Name | title}}
 	for {
 		doc, err := iter.Next()
@@ -752,9 +772,11 @@ func generateMain(projectPath string, config *domain.Config, fs domain.FileSyste
 import (
 	{{if and .Auth .Auth.Enabled}}"context"{{end}}
 	"log"
-	"net/http"
 	"os"
-	{{if not (and .Auth .Auth.Enabled)}}"strings"{{end}}
+	{{if not (and .Auth .Auth.Enabled)}}
+	"net/http"
+	"strings"
+	{{end}}
 
 	"github.com/joho/godotenv"
 	"{{.ProjectName}}/internal/infrastructure/db"
@@ -1053,12 +1075,21 @@ type Mock{{.Model.Name | title}}Repository struct {
 	Data map[string]*domain.{{.Model.Name | title}}
 }
 
-func (m *Mock{{.Model.Name | title}}Repository) List(ctx context.Context) ([]*domain.{{.Model.Name | title}}, error) {
+func (m *Mock{{.Model.Name | title}}Repository) List(ctx context.Context, limit, offset int) ([]*domain.{{.Model.Name | title}}, error) {
 	var results []*domain.{{.Model.Name | title}}
 	for _, v := range m.Data {
 		results = append(results, v)
 	}
-	return results, nil
+	
+	// Simple slicing for mock pagination
+	if offset >= len(results) {
+		return []*domain.{{.Model.Name | title}}{}, nil
+	}
+	end := offset + limit
+	if end > len(results) {
+		end = len(results)
+	}
+	return results[offset:end], nil
 }
 
 func (m *Mock{{.Model.Name | title}}Repository) Get(ctx context.Context, id string) (*domain.{{.Model.Name | title}}, error) {
@@ -1108,7 +1139,7 @@ func Test{{.Model.Name | title}}Handler(t *testing.T) {
 
 	t.Run("List", func(t *testing.T) {
 		w := httptest.NewRecorder()
-		req, _ := http.NewRequest("GET", "/{{.Model.Name | lower}}", nil)
+		req, _ := http.NewRequest("GET", "/{{.Model.Name | lower}}?page=1&limit=10", nil)
 		r.ServeHTTP(w, req)
 		assert.Equal(t, http.StatusOK, w.Code)
 	})
