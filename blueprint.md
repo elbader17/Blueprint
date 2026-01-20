@@ -1,26 +1,39 @@
-# test Blueprint
+# My API Blueprint
 
 ```json
 {
-  "project_name": "test",
+  "project_name": "MyAwesomeAPI",
   "database": {
     "type": "firestore",
-    "project_id": "your-project-id"
+    "project_id": "my-app-id"
   },
   "auth": {
     "enabled": true,
-    "user_collection": "User"
+    "user_collection": "users"
   },
   "models": [
     {
-      "fields": {
-        "created_at": "datetime",
-        "name": "string"
-      },
-      "name": "account",
+      "name": "posts",
       "protected": true,
+      "fields": {
+        "title": "string",
+        "content": "text",
+        "published": "boolean"
+      },
       "relations": {
-        "user": "hasMany:User"
+        "comments": "hasMany:comments",
+        "author": "belongsTo:users"
+      }
+    },
+    {
+      "name": "comments",
+      "protected": true,
+      "fields": {
+        "text": "string",
+        "timestamp": "datetime"
+      },
+      "relations": {
+        "post_id": "belongsTo:posts"
       }
     }
   ]

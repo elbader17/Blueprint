@@ -98,83 +98,176 @@ Key architectural features:
 - **Guard Clauses**: Clean, readable code without nested `if-else`.
 - **Modular Handlers**: Model-specific logic organized in dedicated folders.
 
-## Blueprint Format
+## Blueprint Configuration Guide
 
-The input file must contain a JSON code block with the following structure:
+The `blueprint.md` file is the heart of your project. It defines your API's architecture, database, authentication, and business logic in a single, human-readable file.
 
-### Complete Example (`blueprint.md`)
+### 1. Creating the File
 
-```markdown
-# My E-Commerce Project
+You can create a `blueprint.md` file in two ways:
 
-System architecture definition.
+**Option A: Interactive Wizard (Recommended)**
+Run the tool without arguments. It will ask you questions and generate the file for you.
+```bash
+./blueprint_gen
+```
 
-` + "```" + `json
+**Option B: Manual Creation**
+Create a new file named `blueprint.md` in your project root and add the JSON configuration inside a markdown code block.
+
+### 2. JSON Structure Reference
+
+The `blueprint.md` file must contain a single JSON code block. Here is the complete schema:
+
+```json
 {
-  "project_name": "ShopMasterAPI",
+  "project_name": "string (Required)",
+  "database": { ... },
+  "auth": { ... },
+  "payments": { ... },
+  "models": [ ... ]
+}
+```
+
+#### Global Settings
+| Field | Type | Description |
+|-------|------|-------------|
+| `project_name` | `string` | The name of your project. This will be used for the module name (go.mod) and the root folder. |
+
+#### Database Configuration (`database`)
+Configures the data storage layer.
+
+**Firestore (Firebase)**
+```json
+"database": {
+  "type": "firestore",
+  "project_id": "your-firebase-project-id"
+}
+```
+
+**PostgreSQL**
+```json
+"database": {
+  "type": "postgresql",
+  "url": "postgres://user:pass@localhost:5432/dbname"
+}
+```
+
+**MongoDB**
+```json
+"database": {
+  "type": "mongodb",
+  "url": "mongodb://localhost:27017"
+}
+```
+
+#### Authentication (`auth`)
+(Optional) Enables built-in JWT authentication and user management.
+
+```json
+"auth": {
+  "enabled": true,
+  "user_collection": "users"
+}
+```
+- `enabled`: Set to `true` to generate auth endpoints (`/login`, `/register`).
+- `user_collection`: The name of the database table/collection to store user data.
+
+#### Payments (`payments`)
+(Optional) Integrates payment processing.
+
+```json
+"payments": {
+  "enabled": true,
+  "provider": "mercadopago",
+  "transactions_collection": "transactions"
+}
+```
+- `provider`: Currently supports `mercadopago`.
+- `transactions_collection`: Where to store payment logs.
+
+#### Data Models (`models`)
+Defines your application's entities (tables/collections).
+
+```json
+{
+  "name": "products",
+  "protected": false,
+  "fields": {
+    "name": "string",
+    "price": "float",
+    "description": "text",
+    "is_active": "boolean",
+    "created_at": "datetime"
+  },
+  "relations": {
+    "category": "belongsTo:categories",
+    "reviews": "hasMany:reviews"
+  }
+}
+```
+
+- **`name`**: The name of the resource (plural recommended, e.g., "products").
+- **`protected`**: If `true`, all endpoints for this model will require an Authorization header.
+- **`fields`**: A key-value map defining the data structure.
+    - Supported types:
+        - `string`: Short text (e.g., name, email).
+        - `text`: Long text (e.g., description, bio).
+        - `integer`: Whole numbers (e.g., quantity, age).
+        - `float`: Decimal numbers (e.g., price, rating).
+        - `boolean`: True/False flags.
+        - `datetime`: Date and time timestamps.
+- **`relations`**: Defines how models connect to each other.
+    - `belongsTo:<model_name>`: Many-to-One relationship (e.g., A product belongs to a category).
+    - `hasMany:<model_name>`: One-to-Many relationship (e.g., A user has many orders).
+
+### 3. Full Example
+
+Copy this into your `blueprint.md` to get started:
+
+````markdown
+# My API Blueprint
+
+```json
+{
+  "project_name": "MyAwesomeAPI",
   "database": {
     "type": "firestore",
-    "project_id": "shop-master-prod"
+    "project_id": "my-app-id"
   },
   "auth": {
     "enabled": true,
     "user_collection": "users"
   },
-  "payments": {
-    "enabled": true,
-    "provider": "mercadopago",
-    "transactions_collection": "transactions"
-  },
   "models": [
     {
-      "name": "products",
-      "protected": false,
+      "name": "posts",
+      "protected": true,
       "fields": {
-        "name": "string",
-        "price": "float",
-        "description": "text",
-        "in_stock": "boolean"
+        "title": "string",
+        "content": "text",
+        "published": "boolean"
       },
       "relations": {
-        "category": "belongsTo:categories"
+        "comments": "hasMany:comments",
+        "author": "belongsTo:users"
       }
     },
     {
-      "name": "orders",
+      "name": "comments",
       "protected": true,
       "fields": {
-        "total": "float",
-        "status": "string",
-        "created_at": "datetime"
+        "text": "string",
+        "timestamp": "datetime"
       },
       "relations": {
-        "items": "hasMany:order_items"
+        "post_id": "belongsTo:posts"
       }
     }
   ]
 }
-` + "```" + `
 ```
-
-### Field Explanation
-
-- **`project_name`**: Name of the folder and Go module that will be generated.
-- **`database`**: Configuration for the database driver.
-    - `type`: One of `firestore`, `postgresql`, or `mongodb`.
-    - `project_id`: (Firestore only) Your Firebase Project ID.
-    - `url`: (Postgres/Mongo only) Connection string (e.g., `postgres://user:pass@localhost:5432/db`).
-- **`auth`** (Optional):
-    - `enabled`: `true` to activate the login/register system.
-    - `user_collection`: Name of the Firestore collection where users will be stored (e.g., "users").
-- **`payments`** (Optional):
-    - `enabled`: `true` to activate the payment system.
-    - `provider`: Currently only `mercadopago` is supported.
-    - `transactions_collection`: Name of the Firestore collection where payment notifications will be stored.
-- **`models`**: List of your database entities.
-    - `name`: Name of the collection in Firestore.
-    - `protected`: If `true`, routes for this model will require a valid Bearer token.
-    - `fields`: Map of `field_name: type`. Supported types: `string`, `text`, `integer`, `float`, `boolean`, `datetime`.
-    - `relations`: (Informational) Defines relations between models.
+````
 
 ## Generated Endpoints
 
