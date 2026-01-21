@@ -66,23 +66,48 @@ const PostgresRepoTemplate = `package db
 import (
 	"context"
 	"fmt"
+	{{if .IsJWT}}"time"{{end}}
 	"{{.ProjectName}}/internal/domain"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type {{.Model.Name | title}}Repository struct {
-	repo *PostgresRepository
+	db *pgxpool.Pool
 }
 
 func New{{.Model.Name | title}}Repository(repo *PostgresRepository) *{{.Model.Name | title}}Repository {
+	// Ensure the table exists
 	_, err := repo.Pool.Exec(context.Background(), "{{.CreateTableSQL}}")
 	if err != nil {
 		fmt.Printf("Error creating table {{.Model.Name}}: %v\n", err)
 	}
-	return &{{.Model.Name | title}}Repository{repo: repo}
+	return &{{.Model.Name | title}}Repository{db: repo.Pool}
 }
 
+{{if .IsJWT}}
+func (r *{{.Model.Name | title}}Repository) GetByEmail(ctx context.Context, email string) (*domain.UserAuthData, error) {
+	var user domain.UserAuthData
+	err := r.db.QueryRow(ctx, "SELECT id, email, password, role_id FROM {{.Model.Name}} WHERE email = $1", email).Scan(&user.ID, &user.Email, &user.Password, &user.Role)
+	if err != nil {
+		return nil, err
+	}
+	return &user, nil
+}
+
+func (r *{{.Model.Name | title}}Repository) RegisterUser(ctx context.Context, user *domain.UserAuthData) (string, error) {
+	var id string
+	now := time.Now()
+	err := r.db.QueryRow(ctx, "INSERT INTO {{.Model.Name}} (email, password, role_id, name, picture, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id", 
+		user.Email, user.Password, user.Role, "", "", now, now).Scan(&id)
+	if err != nil {
+		return "", err
+	}
+	return id, nil
+}
+{{end}}
+
 func (r *{{.Model.Name | title}}Repository) List(ctx context.Context, limit, offset int) ([]*domain.{{.Model.Name | title}}, error) {
-	rows, err := r.repo.Pool.Query(ctx, "SELECT {{.SelectColumns}} FROM {{.Model.Name}} LIMIT $1 OFFSET $2", limit, offset)
+	rows, err := r.db.Query(ctx, "SELECT {{.SelectColumns}} FROM {{.Model.Name}} LIMIT $1 OFFSET $2", limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -112,7 +137,7 @@ func (r *{{.Model.Name | title}}Repository) Get(ctx context.Context, id string) 
 	{{end}}
 
 	query := "SELECT {{.SelectColumns}} FROM {{.Model.Name}} WHERE id = $1"
-	err := r.repo.Pool.QueryRow(ctx, query, id).Scan(fields...)
+	err := r.db.QueryRow(ctx, query, id).Scan(fields...)
 	if err != nil {
 		return nil, err
 	}
@@ -128,7 +153,7 @@ func (r *{{.Model.Name | title}}Repository) Create(ctx context.Context, m *domai
 	}
 
 	var id string
-	err := r.repo.Pool.QueryRow(ctx, query, values...).Scan(&id)
+	err := r.db.QueryRow(ctx, query, values...).Scan(&id)
 	if err != nil {
 		return "", err
 	}
@@ -144,12 +169,12 @@ func (r *{{.Model.Name | title}}Repository) Update(ctx context.Context, id strin
 		id,
 	}
 
-	_, err := r.repo.Pool.Exec(ctx, query, values...)
+	_, err := r.db.Exec(ctx, query, values...)
 	return err
 }
 
 func (r *{{.Model.Name | title}}Repository) Delete(ctx context.Context, id string) error {
-	_, err := r.repo.Pool.Exec(ctx, "DELETE FROM {{.Model.Name}} WHERE id = $1", id)
+	_, err := r.db.Exec(ctx, "DELETE FROM {{.Model.Name}} WHERE id = $1", id)
 	return err
 }
 `
@@ -242,6 +267,7 @@ const MongoRepoTemplate = `package db
 
 import (
 	"context"
+	"time"
 	"{{.ProjectName}}/internal/domain"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -255,6 +281,36 @@ type {{.Model.Name | title}}Repository struct {
 func New{{.Model.Name | title}}Repository(repo *MongoRepository) *{{.Model.Name | title}}Repository {
 	return &{{.Model.Name | title}}Repository{repo: repo}
 }
+
+{{if .IsJWT}}
+func (r *{{.Model.Name | title}}Repository) GetByEmail(ctx context.Context, email string) (*domain.UserAuthData, error) {
+	var m domain.{{.Model.Name | title}}
+	if err := r.repo.DB.Collection("{{.Model.Name}}").FindOne(ctx, bson.M{"email": email}).Decode(&m); err != nil {
+		return nil, err
+	}
+	return &domain.UserAuthData{
+		ID:       m.ID,
+		Email:    m.Email,
+		Password: m.Password,
+		Role:     m.RoleId,
+	}, nil
+}
+
+func (r *{{.Model.Name | title}}Repository) RegisterUser(ctx context.Context, user *domain.UserAuthData) (string, error) {
+	now := time.Now()
+	res, err := r.repo.DB.Collection("{{.Model.Name}}").InsertOne(ctx, bson.M{
+		"email":      user.Email,
+		"password":   user.Password,
+		"role_id":    user.Role,
+		"created_at": now,
+		"updated_at": now,
+	})
+	if err != nil {
+		return "", err
+	}
+	return res.InsertedID.(primitive.ObjectID).Hex(), nil
+}
+{{end}}
 
 func (r *{{.Model.Name | title}}Repository) List(ctx context.Context, limit, offset int) ([]*domain.{{.Model.Name | title}}, error) {
 	opts := options.Find().SetLimit(int64(limit)).SetSkip(int64(offset))

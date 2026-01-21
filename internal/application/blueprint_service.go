@@ -45,24 +45,34 @@ func (s *BlueprintService) enrichAuth(config *domain.Config) {
 		return
 	}
 
+	if config.Auth.Provider == "" {
+		config.Auth.Provider = "firebase"
+	}
+
 	if config.Auth.UserCollection == "" {
 		config.Auth.UserCollection = "users"
 	}
 
 	if !s.hasModel(config, config.Auth.UserCollection) {
+		fields := map[string]string{
+			"email":      "string",
+			"name":       "string",
+			"picture":    "string",
+			"role_id":    "string",
+			"created_at": "datetime",
+			"updated_at": "datetime",
+		}
+
+		if config.Auth.Provider == "firebase" {
+			fields["uid"] = "string"
+		} else {
+			fields["password"] = "string"
+		}
+
 		config.Models = append(config.Models, domain.Model{
 			Name:      config.Auth.UserCollection,
 			Protected: true,
-			Fields: map[string]string{
-				"uid":        "string",
-				"email":      "string",
-				"name":       "string",
-				"picture":    "string",
-				"roleId":     "string",
-				"settingsId": "string",
-				"created_at": "datetime",
-				"updated_at": "datetime",
-			},
+			Fields:    fields,
 			Relations: map[string]string{},
 		})
 	}
@@ -82,6 +92,8 @@ func (s *BlueprintService) enrichPayments(config *domain.Config) {
 			Name:      config.Payments.TransactionsColl,
 			Protected: true,
 			Fields: map[string]string{
+				"amount":     "float",
+				"status":     "string",
 				"provider":   "string",
 				"payload":    "text",
 				"created_at": "datetime",

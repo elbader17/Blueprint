@@ -2,10 +2,10 @@ package domain
 
 // Config represents the top-level structure of the blueprint JSON
 type Config struct {
-	ProjectName        string    `json:"project_name"`
-	Database           Database  `json:"database"`
-	FirestoreProjectID string    `json:"firestore_project_id,omitempty"` // Deprecated: use Database.ProjectID
-	Auth               *Auth     `json:"auth,omitempty"`
+	ProjectName        string      `json:"project_name"`
+	Database           Database    `json:"database"`
+	FirestoreProjectID string      `json:"firestore_project_id,omitempty"` // Deprecated: use Database.ProjectID
+	Auth               *Auth       `json:"auth,omitempty"`
 	Payments           *Payments   `json:"payments,omitempty"`
 	Pagination         *Pagination `json:"pagination,omitempty"`
 	Models             []Model     `json:"models"`
@@ -18,7 +18,7 @@ type Pagination struct {
 
 // Database configures the database driver
 type Database struct {
-	Type      string `json:"type"`       // "firestore", "postgresql", "mongodb"
+	Type      string `json:"type"`                 // "firestore", "postgresql", "mongodb"
 	ProjectID string `json:"project_id,omitempty"` // For Firestore
 	URL       string `json:"url,omitempty"`        // For Postgres/Mongo
 }
@@ -26,13 +26,14 @@ type Database struct {
 // Auth configures the authentication module
 type Auth struct {
 	Enabled        bool   `json:"enabled"`
+	Provider       string `json:"provider"` // "firebase" (default) or "jwt"
 	UserCollection string `json:"user_collection"`
 }
 
 // Payments configures the payment module
 type Payments struct {
-	Enabled           bool   `json:"enabled"`
-	Provider          string `json:"provider"` // e.g., "mercadopago"
+	Enabled          bool   `json:"enabled"`
+	Provider         string `json:"provider"` // e.g., "mercadopago"
 	TransactionsColl string `json:"transactions_collection"`
 }
 

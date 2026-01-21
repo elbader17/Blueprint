@@ -14,69 +14,12 @@ import (
 func Generate(config *domain.Config, outputDir string, fs domain.FileSystemPort, template domain.TemplatePort) error {
 	projectPath := filepath.Join(outputDir, config.ProjectName)
 	fmt.Printf("Creating project at %s\n", projectPath)
-	
+
 	if err := fs.MkdirAll(projectPath); err != nil {
 		return fmt.Errorf("failed to create project directory: %w", err)
 	}
 
 	// Cleanup old directories/files if they exist
-	oldPaths := []string{
-		"internal/db",
-		"internal/handlers",
-		"internal/domain",
-		"cmd/api/handlers_test.go",
-	}
-	for _, p := range oldPaths {
-		if err := fs.RemoveAll(filepath.Join(projectPath, p)); err != nil {
-			fmt.Printf("Warning: failed to remove old path %s: %v\n", p, err)
-		}
-	}
-
-	// Inject required models for Auth and Payments if missing
-	if config.Auth != nil && config.Auth.Enabled {
-		found := false
-		for _, m := range config.Models {
-			if strings.EqualFold(m.Name, config.Auth.UserCollection) {
-				found = true
-				break
-			}
-		}
-		if !found {
-			config.Models = append(config.Models, domain.Model{
-				Name:      config.Auth.UserCollection,
-				Protected: true,
-				Fields: map[string]string{
-					"email":   "string",
-					"name":    "string",
-					"role_id": "string",
-					"picture": "string",
-				},
-			})
-		}
-	}
-
-	if config.Payments != nil && config.Payments.Enabled {
-		found := false
-		for _, m := range config.Models {
-			if strings.EqualFold(m.Name, config.Payments.TransactionsColl) {
-				found = true
-				break
-			}
-		}
-		if !found {
-			config.Models = append(config.Models, domain.Model{
-				Name:      config.Payments.TransactionsColl,
-				Protected: true,
-				Fields: map[string]string{
-					"amount":     "float",
-					"status":     "string",
-					"provider":   "string",
-					"created_at": "datetime",
-					"payload":    "string",
-				},
-			})
-		}
-	}
 
 	if err := createDirectories(projectPath, config, fs); err != nil {
 		return err
@@ -141,7 +84,104 @@ func Generate(config *domain.Config, outputDir string, fs domain.FileSystemPort,
 		return err
 	}
 
+	if err := generateDockerfile(projectPath, config, fs, template); err != nil {
+		return err
+	}
+
+	if err := generateDockerCompose(projectPath, config, fs, template); err != nil {
+		return err
+	}
+
 	return nil
+}
+
+func generateDockerCompose(projectPath string, config *domain.Config, fs domain.FileSystemPort, template domain.TemplatePort) error {
+	const dockerComposeTemplate = `version: '3.8'
+
+services:
+  api:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      - PORT=8080
+      {{if eq .Database.Type "postgresql"}}
+      - DATABASE_URL=postgres://user:password@postgres:5432/{{.ProjectName}}
+      {{else if eq .Database.Type "mongodb"}}
+      - DATABASE_URL=mongodb://mongo:27017
+      {{else if eq .Database.Type "firestore"}}
+      - FIRESTORE_PROJECT_ID={{.Database.ProjectID}}
+      - GOOGLE_APPLICATION_CREDENTIALS=/app/firebaseCredentials.json
+      {{end}}
+      {{if and .Auth .Auth.Enabled}}
+      - MOCK_AUTH=false
+      {{end}}
+      {{if and .Payments .Payments.Enabled}}
+      {{if eq .Payments.Provider "mercadopago"}}
+      - MP_ACCESS_TOKEN=your_token_here
+      {{else if eq .Payments.Provider "stripe"}}
+      - STRIPE_SECRET_KEY=your_stripe_secret_key
+      - STRIPE_WEBHOOK_SECRET=your_stripe_webhook_secret
+      {{end}}
+      {{end}}
+    depends_on:
+      {{if eq .Database.Type "postgresql"}}
+      - postgres
+      {{else if eq .Database.Type "mongodb"}}
+      - mongo
+      {{end}}
+
+  {{if eq .Database.Type "postgresql"}}
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: {{.ProjectName}}
+    ports:
+      - "5432:5432"
+  {{else if eq .Database.Type "mongodb"}}
+  mongo:
+    image: mongo:6.0
+    ports:
+      - "27017:27017"
+  {{end}}
+`
+	content, err := template.Render("docker-compose", dockerComposeTemplate, config)
+	if err != nil {
+		return err
+	}
+	return fs.WriteFile(filepath.Join(projectPath, "docker-compose.yml"), content)
+}
+
+func generateDockerfile(projectPath string, config *domain.Config, fs domain.FileSystemPort, template domain.TemplatePort) error {
+	const dockerfileTemplate = `# Build stage
+FROM golang:1.23-alpine AS builder
+WORKDIR /app
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN go mod tidy
+RUN CGO_ENABLED=0 GOOS=linux go build -o main cmd/api/main.go
+
+# Run stage
+FROM alpine:latest
+WORKDIR /app
+COPY --from=builder /app/main .
+# Copy .env if it exists (usually better to pass env vars in docker-compose, but useful for standalone)
+COPY --from=builder /app/.env .
+{{if eq .Database.Type "firestore"}}
+COPY --from=builder /app/firebaseCredentials.json .
+{{end}}
+
+EXPOSE 8080
+CMD ["./main"]
+`
+	content, err := template.Render("dockerfile", dockerfileTemplate, config)
+	if err != nil {
+		return err
+	}
+	return fs.WriteFile(filepath.Join(projectPath, "Dockerfile"), content)
 }
 
 func generateMakefile(projectPath string, config *domain.Config, fs domain.FileSystemPort, template domain.TemplatePort) error {
@@ -216,11 +256,15 @@ func generateAuth(projectPath string, config *domain.Config, fs domain.FileSyste
 }
 
 func generatePayments(projectPath string, config *domain.Config, fs domain.FileSystemPort, template domain.TemplatePort) error {
+	// Generate config if Auth or Payments enabled
+	if (config.Auth != nil && config.Auth.Enabled) || (config.Payments != nil && config.Payments.Enabled) {
+		if err := generateConfigFiles(projectPath, config, fs, template); err != nil {
+			return err
+		}
+	}
+
 	if config.Payments == nil || !config.Payments.Enabled {
 		return nil
-	}
-	if err := generateConfigFiles(projectPath, config, fs, template); err != nil {
-		return err
 	}
 	return generatePaymentFiles(projectPath, config, fs, template)
 }
@@ -248,6 +292,15 @@ func generateGoMod(projectPath string, config *domain.Config, fs domain.FileSyst
 	deps = append(deps, "github.com/stretchr/testify v1.8.4")
 	deps = append(deps, "github.com/joho/godotenv v1.5.1")
 
+	if config.Auth != nil && config.Auth.Enabled && config.Auth.Provider == "jwt" {
+		deps = append(deps, "github.com/golang-jwt/jwt/v5 v5.2.0")
+		deps = append(deps, "golang.org/x/crypto v0.19.0")
+	}
+
+	if config.Payments != nil && config.Payments.Enabled && config.Payments.Provider == "stripe" {
+		deps = append(deps, "github.com/stripe/stripe-go/v76 v76.0.0")
+	}
+
 	switch config.Database.Type {
 	case "firestore":
 		deps = append(deps, "cloud.google.com/go/firestore v1.14.0")
@@ -261,7 +314,7 @@ func generateGoMod(projectPath string, config *domain.Config, fs domain.FileSyst
 
 	content := fmt.Sprintf(`module %s
 
-go 1.21
+go 1.23
 
 require (
 	%s
@@ -419,12 +472,15 @@ func (r *FirestoreRepository) Delete(ctx context.Context, collection, id string)
 func generateModelDomain(projectPath string, config *domain.Config, model domain.Model, fs domain.FileSystemPort, template domain.TemplatePort) error {
 	const domainTemplate = `package domain
 
-import "context"
+import (
+	"context"
+	{{$hasTime := false}}{{range $k, $v := .Model.Fields}}{{if eq $v "datetime"}}{{$hasTime = true}}{{end}}{{end}}{{if $hasTime}}"time"{{end}}
+)
 
 type {{.Model.Name | title}} struct {
 	ID string ` + "`" + `json:"id"` + "`" + `
 	{{range $k, $v := .Model.Fields}}
-	{{$k | pascal}} {{if eq $v "string"}}string{{else if eq $v "integer"}}int{{else if eq $v "float"}}float64{{else if eq $v "boolean"}}bool{{else}}interface{}{{end}} ` + "`" + `json:"{{$k}}"` + "`" + `
+	{{$k | pascal}} {{if eq $v "string"}}string{{else if eq $v "integer"}}int{{else if eq $v "float"}}float64{{else if eq $v "boolean"}}bool{{else if eq $v "datetime"}}time.Time{{else}}interface{}{{end}} ` + "`" + `json:"{{$k}}"` + "`" + `
 	{{end}}
 	{{range $k, $v := .Model.Relations}}
 	{{$k | pascal}} {{if hasPrefix $v "hasMany"}}[]string{{else}}string{{end}} ` + "`" + `json:"{{$k}}"` + "`" + `
@@ -564,11 +620,20 @@ func (h *{{.Model.Name | title}}Handler) Delete(c *gin.Context) {
 }
 
 func generatePaymentFiles(projectPath string, config *domain.Config, fs domain.FileSystemPort, template domain.TemplatePort) error {
-	content, err := template.Render("mercadopago", MercadoPagoTemplate, config)
-	if err != nil {
-		return err
+	if config.Payments.Provider == "mercadopago" {
+		content, err := template.Render("mercadopago", MercadoPagoTemplate, config)
+		if err != nil {
+			return err
+		}
+		return fs.WriteFile(filepath.Join(projectPath, "internal/payments/mercadopago.go"), content)
+	} else if config.Payments.Provider == "stripe" {
+		content, err := template.Render("stripe", StripeTemplate, config)
+		if err != nil {
+			return err
+		}
+		return fs.WriteFile(filepath.Join(projectPath, "internal/payments/stripe.go"), content)
 	}
-	return fs.WriteFile(filepath.Join(projectPath, "internal/payments/mercadopago.go"), content)
+	return nil
 }
 
 func generateConfigFiles(projectPath string, config *domain.Config, fs domain.FileSystemPort, template domain.TemplatePort) error {
@@ -580,11 +645,50 @@ func generateConfigFiles(projectPath string, config *domain.Config, fs domain.Fi
 }
 
 func generateAuthFiles(projectPath string, config *domain.Config, fs domain.FileSystemPort, template domain.TemplatePort) error {
-	if err := fs.WriteFile(filepath.Join(projectPath, "internal/auth/middleware.go"), []byte(AuthMiddlewareTemplate)); err != nil {
+	var middlewareTemplate string
+	var handlerTemplateStr string
+
+	if config.Auth.Provider == "jwt" {
+		middlewareTemplate = JWTMiddlewareTemplate
+		handlerTemplateStr = JWTAuthHandlerTemplate
+
+		// Generate domain/auth.go for UserAuthData
+		const authDomainTemplate = `package domain
+
+import "context"
+
+// UserAuthData represents minimal data needed for auth
+type UserAuthData struct {
+	ID       string
+	Email    string
+	Password string
+	Role     string
+}
+
+// UserRepository interface to fetch password hashes
+type UserRepository interface {
+	GetByEmail(ctx context.Context, email string) (*UserAuthData, error)
+	RegisterUser(ctx context.Context, user *UserAuthData) (string, error)
+}
+`
+		if err := fs.WriteFile(filepath.Join(projectPath, "internal/domain/auth.go"), []byte(authDomainTemplate)); err != nil {
+			return err
+		}
+
+	} else {
+		middlewareTemplate = AuthMiddlewareTemplate
+		handlerTemplateStr = AuthHandlerTemplate
+	}
+
+	middlewareContent, err := template.Render("auth_middleware", middlewareTemplate, config)
+	if err != nil {
+		return err
+	}
+	if err := fs.WriteFile(filepath.Join(projectPath, "internal/auth/middleware.go"), middlewareContent); err != nil {
 		return err
 	}
 
-	content, err := template.Render("auth_handler", AuthHandlerTemplate, config)
+	content, err := template.Render("auth_handler", handlerTemplateStr, config)
 	if err != nil {
 		return err
 	}
@@ -609,6 +713,26 @@ type {{.Model.Name | title}}Repository struct {
 
 func New{{.Model.Name | title}}Repository(client *FirestoreRepository) *{{.Model.Name | title}}Repository {
 	return &{{.Model.Name | title}}Repository{client: client}
+}
+
+// GetByEmail is used for JWT auth
+func (r *{{.Model.Name | title}}Repository) GetByEmail(ctx context.Context, email string) (*domain.UserAuthData, error) {
+	iter := r.client.client.Collection("{{.Model.Name}}").Where("email", "==", email).Documents(ctx)
+	doc, err := iter.Next()
+	if err != nil {
+		return nil, err
+	}
+	var m domain.{{.Model.Name | title}}
+	if err := doc.DataTo(&m); err != nil {
+		return nil, err
+	}
+	// Map to UserAuthData
+	return &domain.UserAuthData{
+		ID: doc.Ref.ID,
+		Email: m.Email,
+		{{if .IsJWT}}Password: m.Password,{{end}}
+		Role: m.RoleId,
+	}, nil
 }
 
 func (r *{{.Model.Name | title}}Repository) List(ctx context.Context, limit, offset int) ([]*domain.{{.Model.Name | title}}, error) {
@@ -645,13 +769,31 @@ func (r *{{.Model.Name | title}}Repository) Get(ctx context.Context, id string) 
 	return &m, nil
 }
 
-func (r *{{.Model.Name | title}}Repository) Create(ctx context.Context, m *domain.{{.Model.Name | title}}) (string, error) {
-	ref, _, err := r.client.client.Collection("{{.Model.Name}}").Add(ctx, m)
+func (r *{{.Model.Name | title}}Repository) Create(ctx context.Context, model *domain.{{.Model.Name | title}}) (string, error) {
+	ref, _, err := r.client.client.Collection("{{.Model.Name}}").Add(ctx, model)
 	if err != nil {
 		return "", err
 	}
 	return ref.ID, nil
 }
+
+{{if .IsJWT}}
+func (r *{{.Model.Name | title}}Repository) RegisterUser(ctx context.Context, user *domain.UserAuthData) (string, error) {
+	now := time.Now()
+	data := map[string]interface{}{
+		"email":      user.Email,
+		"password":   user.Password,
+		"role_id":    user.Role,
+		"created_at": now,
+		"updated_at": now,
+	}
+	ref, _, err := r.client.client.Collection("{{.Model.Name}}").Add(ctx, data)
+	if err != nil {
+		return "", err
+	}
+	return ref.ID, nil
+}
+{{end}}
 
 func (r *{{.Model.Name | title}}Repository) Update(ctx context.Context, id string, m *domain.{{.Model.Name | title}}) error {
 	_, err := r.client.client.Collection("{{.Model.Name}}").Doc(id).Set(ctx, m)
@@ -664,6 +806,11 @@ func (r *{{.Model.Name | title}}Repository) Delete(ctx context.Context, id strin
 }
 `
 	case "postgresql":
+		// I'll need to adapt the Postgres template dynamically too, but let's stick to the base pattern first.
+		// For now, I'll update the PostgresRepoTemplate constant if possible, or inject the GetByEmail logic.
+		// Since PostgresRepoTemplate is likely a large string, I should check if I can modify it or append methods.
+		// The current architecture uses a fixed template. I might need to make it more flexible.
+		// For simplicity in this iteration, I will inject the GetByEmail method into the template data if it's the User collection.
 		repoTemplate = PostgresRepoTemplate
 	case "mongodb":
 		repoTemplate = MongoRepoTemplate
@@ -727,6 +874,7 @@ func (r *{{.Model.Name | title}}Repository) Delete(ctx context.Context, id strin
 		SelectColumns      string
 		CreateTableSQL     string
 		TotalFields        int
+		IsJWT              bool
 	}{
 		ProjectName:        config.ProjectName,
 		Model:              model,
@@ -737,6 +885,7 @@ func (r *{{.Model.Name | title}}Repository) Delete(ctx context.Context, id strin
 		SelectColumns:      strings.Join(selectCols, ", "),
 		CreateTableSQL:     fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (%s)", model.Name, strings.Join(schemaCols, ", ")),
 		TotalFields:        len(allFields),
+		IsJWT:              config.Auth != nil && config.Auth.Provider == "jwt" && model.Name == config.Auth.UserCollection,
 	}
 
 	content, err := template.Render(model.Name+"_repo", repoTemplate, data)
@@ -755,12 +904,17 @@ func generateEnvFile(projectPath string, config *domain.Config, fs domain.FileSy
 		buffer.WriteString("DATABASE_URL=your_database_url_here\n")
 	}
 
-	if config.Auth != nil && config.Auth.Enabled {
-		buffer.WriteString("MOCK_AUTH=false\n")
+	if config.Auth != nil && config.Auth.Enabled && config.Auth.Provider == "jwt" {
+		buffer.WriteString("JWT_SECRET=your_secret_key_here\n")
 	}
 
 	if config.Payments != nil && config.Payments.Enabled {
-		buffer.WriteString("MP_ACCESS_TOKEN=your_mercadopago_access_token_here\n")
+		if config.Payments.Provider == "mercadopago" {
+			buffer.WriteString("MP_ACCESS_TOKEN=your_mercadopago_access_token_here\n")
+		} else if config.Payments.Provider == "stripe" {
+			buffer.WriteString("STRIPE_SECRET_KEY=your_stripe_secret_key_here\n")
+			buffer.WriteString("STRIPE_WEBHOOK_SECRET=your_stripe_webhook_secret_here\n")
+		}
 	}
 
 	return fs.WriteFile(filepath.Join(projectPath, ".env"), buffer.Bytes())
@@ -770,7 +924,7 @@ func generateMain(projectPath string, config *domain.Config, fs domain.FileSyste
 	const mainTemplate = `package main
 
 import (
-	{{if and .Auth .Auth.Enabled}}"context"{{end}}
+	{{if and .Auth .Auth.Enabled}}{{if eq .Auth.Provider "firebase"}}"context"{{end}}{{end}}
 	"log"
 	"os"
 	{{if not (and .Auth .Auth.Enabled)}}
@@ -787,7 +941,7 @@ import (
 	{{if and .Auth .Auth.Enabled}}
 	authService "{{.ProjectName}}/internal/auth"
 	authHandler "{{.ProjectName}}/internal/handlers/auth"
-	firebase "firebase.google.com/go/v4"
+	{{if eq .Auth.Provider "firebase"}}firebase "firebase.google.com/go/v4"{{end}}
 	{{end}}
 	{{if and .Payments .Payments.Enabled}}
 	"{{.ProjectName}}/internal/payments"
@@ -818,6 +972,18 @@ func main() {
 
 	{{if and .Auth .Auth.Enabled}}
 	// Initialize Auth Service
+	{{if eq .Auth.Provider "jwt"}}
+	// Initialize User Repo for JWT
+	{{if eq .Database.Type "firestore"}}
+	userRepo := db.New{{.Auth.UserCollection | title}}Repository(baseRepo.(*db.FirestoreRepository))
+	{{else if eq .Database.Type "postgresql"}}
+	userRepo := db.New{{.Auth.UserCollection | title}}Repository(baseRepo.(*db.PostgresRepository))
+	{{else if eq .Database.Type "mongodb"}}
+	userRepo := db.New{{.Auth.UserCollection | title}}Repository(baseRepo.(*db.MongoRepository))
+	{{end}}
+	authSvc := authService.NewJWTAuthService(userRepo)
+	userHdl := authHandler.NewUserHandler(authSvc, userRepo, "{{.Auth.UserCollection}}")
+	{{else}}
 	var authSvc authService.AuthService
 	if os.Getenv("MOCK_AUTH") == "true" {
 		log.Println("Using Mock Auth Service")
@@ -834,7 +1000,6 @@ func main() {
 		}
 		authSvc = &authService.FirebaseAuthService{Client: authClient}
 	}
-
 	// Initialize User Handler
 	{{if eq .Database.Type "firestore"}}
 	userRepo := db.New{{.Auth.UserCollection | title}}Repository(baseRepo.(*db.FirestoreRepository))
@@ -844,6 +1009,7 @@ func main() {
 	userRepo := db.New{{.Auth.UserCollection | title}}Repository(baseRepo.(*db.MongoRepository))
 	{{end}}
 	userHdl := authHandler.NewUserHandler(authSvc, userRepo, "{{.Auth.UserCollection}}")
+	{{end}}
 	{{end}}
 
 	{{if and .Payments .Payments.Enabled}}
@@ -855,7 +1021,12 @@ func main() {
 	{{else if eq .Database.Type "mongodb"}}
 	mpRepo := db.New{{.Payments.TransactionsColl | title}}Repository(baseRepo.(*db.MongoRepository))
 	{{end}}
+
+	{{if eq .Payments.Provider "mercadopago"}}
 	mpService := payments.NewMercadoPagoService(mpRepo)
+	{{else if eq .Payments.Provider "stripe"}}
+	stripeService := payments.NewStripeService(mpRepo)
+	{{end}}
 	{{end}}
 
 	// Setup Router
@@ -867,8 +1038,8 @@ func main() {
 	{{if and .Auth .Auth.Enabled}}
 	// Auth Routes
 	authGroup := r.Group("/auth")
-	authGroup.POST("/login", authService.AuthMiddleware(authSvc), userHdl.Login)
-	authGroup.POST("/register", authService.AuthMiddleware(authSvc), userHdl.Login)
+	authGroup.POST("/login", userHdl.Login)
+	authGroup.POST("/register", userHdl.Register)
 	authGroup.GET("/me", authService.AuthMiddleware(authSvc), userHdl.GetMe)
 	authGroup.GET("/roles", authService.AuthMiddleware(authSvc), userHdl.GetRoles)
 	{{end}}
@@ -876,8 +1047,13 @@ func main() {
 	{{if and .Payments .Payments.Enabled}}
 	// Payment Routes
 	paymentGroup := r.Group("/payments")
+	{{if eq .Payments.Provider "mercadopago"}}
 	paymentGroup.POST("/mercadopago/preference", mpService.CreatePreferenceHandler)
 	paymentGroup.POST("/mercadopago/webhook", mpService.HandleWebhook)
+	{{else if eq .Payments.Provider "stripe"}}
+	paymentGroup.POST("/stripe/payment-intent", stripeService.CreatePaymentIntentHandler)
+	paymentGroup.POST("/stripe/webhook", stripeService.HandleWebhook)
+	{{end}}
 	{{end}}
 
 	{{range .Models}}
@@ -977,7 +1153,12 @@ func generateTestScript(projectPath string, config *domain.Config, fs domain.Fil
 	buf.WriteString("echo \"Starting server in background...\"\n")
 	buf.WriteString("export MOCK_AUTH=true\n")
 	if config.Payments != nil && config.Payments.Enabled {
-		buf.WriteString("export MP_ACCESS_TOKEN=\"TEST_MP_TOKEN_12345\"\n")
+		if config.Payments.Provider == "mercadopago" {
+			buf.WriteString("export MP_ACCESS_TOKEN=\"TEST_MP_TOKEN_12345\"\n")
+		} else if config.Payments.Provider == "stripe" {
+			buf.WriteString("export STRIPE_SECRET_KEY=\"sk_test_12345\"\n")
+			buf.WriteString("export STRIPE_WEBHOOK_SECRET=\"whsec_12345\"\n")
+		}
 	}
 	buf.WriteString("go run cmd/api/main.go &\n")
 	buf.WriteString("PID=$!\n")
@@ -1026,7 +1207,12 @@ func generateSetupScript(projectPath string, config *domain.Config, fs domain.Fi
 	buf.WriteString("echo \"Server will be available at http://localhost:8080\"\n")
 	buf.WriteString("echo \"Swagger docs available at http://localhost:8080/swagger/index.html\"\n")
 	if config.Payments != nil && config.Payments.Enabled {
-		buf.WriteString("export MP_ACCESS_TOKEN=\"YOUR_MERCADO_PAGO_ACCESS_TOKEN_HERE\"\n")
+		if config.Payments.Provider == "mercadopago" {
+			buf.WriteString("export MP_ACCESS_TOKEN=\"YOUR_MERCADO_PAGO_ACCESS_TOKEN_HERE\"\n")
+		} else if config.Payments.Provider == "stripe" {
+			buf.WriteString("export STRIPE_SECRET_KEY=\"YOUR_STRIPE_SECRET_KEY_HERE\"\n")
+			buf.WriteString("export STRIPE_WEBHOOK_SECRET=\"YOUR_STRIPE_WEBHOOK_SECRET_HERE\"\n")
+		}
 	}
 	buf.WriteString("go run cmd/api/main.go\n")
 
