@@ -66,8 +66,11 @@ const PostgresRepoTemplate = `package db
 import (
 	"context"
 	"fmt"
-	{{if .IsJWT}}"time"{{end}}
 	"{{.ProjectName}}/internal/domain"
+	{{if .IsJWT}}
+	"time"
+	{{end}}
+
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -267,8 +270,11 @@ const MongoRepoTemplate = `package db
 
 import (
 	"context"
-	"time"
 	"{{.ProjectName}}/internal/domain"
+	{{if .IsJWT}}
+	"time"
+	{{end}}
+
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo/options"

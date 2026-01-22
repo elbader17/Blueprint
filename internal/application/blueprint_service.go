@@ -54,27 +54,50 @@ func (s *BlueprintService) enrichAuth(config *domain.Config) {
 	}
 
 	if !s.hasModel(config, config.Auth.UserCollection) {
-		fields := map[string]string{
-			"email":      "string",
-			"name":       "string",
-			"picture":    "string",
-			"role_id":    "string",
-			"created_at": "datetime",
-			"updated_at": "datetime",
-		}
-
-		if config.Auth.Provider == "firebase" {
-			fields["uid"] = "string"
-		} else {
-			fields["password"] = "string"
-		}
-
 		config.Models = append(config.Models, domain.Model{
 			Name:      config.Auth.UserCollection,
 			Protected: true,
-			Fields:    fields,
+			Fields:    map[string]string{},
 			Relations: map[string]string{},
 		})
+	}
+
+	// Ensure required auth fields are present
+	for i, m := range config.Models {
+		if m.Name == config.Auth.UserCollection {
+			if m.Fields == nil {
+				config.Models[i].Fields = make(map[string]string)
+			}
+			if _, ok := m.Fields["email"]; !ok {
+				config.Models[i].Fields["email"] = "string"
+			}
+			if _, ok := m.Fields["name"]; !ok {
+				config.Models[i].Fields["name"] = "string"
+			}
+			if _, ok := m.Fields["picture"]; !ok {
+				config.Models[i].Fields["picture"] = "string"
+			}
+			if _, ok := m.Fields["role_id"]; !ok {
+				config.Models[i].Fields["role_id"] = "string"
+			}
+			if _, ok := m.Fields["created_at"]; !ok {
+				config.Models[i].Fields["created_at"] = "datetime"
+			}
+			if _, ok := m.Fields["updated_at"]; !ok {
+				config.Models[i].Fields["updated_at"] = "datetime"
+			}
+
+			if config.Auth.Provider == "firebase" {
+				if _, ok := m.Fields["uid"]; !ok {
+					config.Models[i].Fields["uid"] = "string"
+				}
+			} else {
+				if _, ok := m.Fields["password"]; !ok {
+					config.Models[i].Fields["password"] = "string"
+				}
+			}
+			break
+		}
 	}
 }
 

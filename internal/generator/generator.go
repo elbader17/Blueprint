@@ -292,9 +292,12 @@ func generateGoMod(projectPath string, config *domain.Config, fs domain.FileSyst
 	deps = append(deps, "github.com/stretchr/testify v1.8.4")
 	deps = append(deps, "github.com/joho/godotenv v1.5.1")
 
-	if config.Auth != nil && config.Auth.Enabled && config.Auth.Provider == "jwt" {
-		deps = append(deps, "github.com/golang-jwt/jwt/v5 v5.2.0")
-		deps = append(deps, "golang.org/x/crypto v0.19.0")
+	if config.Auth != nil && config.Auth.Enabled {
+		deps = append(deps, "firebase.google.com/go/v4 v4.13.0")
+		if config.Auth.Provider == "jwt" {
+			deps = append(deps, "github.com/golang-jwt/jwt/v5 v5.2.0")
+			deps = append(deps, "golang.org/x/crypto v0.19.0")
+		}
 	}
 
 	if config.Payments != nil && config.Payments.Enabled && config.Payments.Provider == "stripe" {
@@ -304,7 +307,6 @@ func generateGoMod(projectPath string, config *domain.Config, fs domain.FileSyst
 	switch config.Database.Type {
 	case "firestore":
 		deps = append(deps, "cloud.google.com/go/firestore v1.14.0")
-		deps = append(deps, "firebase.google.com/go/v4 v4.13.0")
 		deps = append(deps, "google.golang.org/api v0.150.0")
 	case "postgresql":
 		deps = append(deps, "github.com/jackc/pgx/v5 v5.5.0")
@@ -387,7 +389,7 @@ func NewFirestoreRepository() (Repository, error) {
 	
 	// Use credentials file copied to the project root
 	opt := option.WithCredentialsFile("firebaseCredentials.json")
-	conf := &firebase.Config{ProjectID: "{{.FirestoreProjectID}}"}
+	conf := &firebase.Config{ProjectID: "{{.Database.ProjectID}}"}
 	
 	app, err := firebase.NewApp(ctx, conf, opt)
 	if err != nil {
@@ -478,12 +480,12 @@ import (
 )
 
 type {{.Model.Name | title}} struct {
-	ID string ` + "`" + `json:"id"` + "`" + `
+	ID string ` + "`" + `json:"id" bson:"_id,omitempty"` + "`" + `
 	{{range $k, $v := .Model.Fields}}
-	{{$k | pascal}} {{if eq $v "string"}}string{{else if eq $v "integer"}}int{{else if eq $v "float"}}float64{{else if eq $v "boolean"}}bool{{else if eq $v "datetime"}}time.Time{{else}}interface{}{{end}} ` + "`" + `json:"{{$k}}"` + "`" + `
+	{{$k | pascal}} {{if eq $v "string"}}string{{else if eq $v "integer"}}int{{else if eq $v "float"}}float64{{else if eq $v "boolean"}}bool{{else if eq $v "datetime"}}time.Time{{else}}interface{}{{end}} ` + "`" + `json:"{{$k}}" bson:"{{$k}}"` + "`" + `
 	{{end}}
 	{{range $k, $v := .Model.Relations}}
-	{{$k | pascal}} {{if hasPrefix $v "hasMany"}}[]string{{else}}string{{end}} ` + "`" + `json:"{{$k}}"` + "`" + `
+	{{$k | pascal}} {{if hasPrefix $v "hasMany"}}[]string{{else}}string{{end}} ` + "`" + `json:"{{$k}}" bson:"{{$k}}"` + "`" + `
 	{{end}}
 }
 
@@ -703,6 +705,7 @@ func generateModelRepository(projectPath string, config *domain.Config, model do
 
 import (
 	"context"
+	{{if .IsJWT}}"time"{{end}}
 	"{{.ProjectName}}/internal/domain"
 	"google.golang.org/api/iterator"
 )
@@ -716,6 +719,7 @@ func New{{.Model.Name | title}}Repository(client *FirestoreRepository) *{{.Model
 }
 
 // GetByEmail is used for JWT auth
+{{if .IsJWT}}
 func (r *{{.Model.Name | title}}Repository) GetByEmail(ctx context.Context, email string) (*domain.UserAuthData, error) {
 	iter := r.client.client.Collection("{{.Model.Name}}").Where("email", "==", email).Documents(ctx)
 	doc, err := iter.Next()
@@ -734,6 +738,7 @@ func (r *{{.Model.Name | title}}Repository) GetByEmail(ctx context.Context, emai
 		Role: m.RoleId,
 	}, nil
 }
+{{end}}
 
 func (r *{{.Model.Name | title}}Repository) List(ctx context.Context, limit, offset int) ([]*domain.{{.Model.Name | title}}, error) {
 	iter := r.client.client.Collection("{{.Model.Name}}").Offset(offset).Limit(limit).Documents(ctx)
@@ -864,6 +869,13 @@ func (r *{{.Model.Name | title}}Repository) Delete(ctx context.Context, id strin
 		schemaCols = append(schemaCols, fmt.Sprintf("%s %s", f, sqlType))
 	}
 
+	isJWT := false
+	if config.Auth != nil && config.Auth.Enabled && config.Auth.Provider == "jwt" {
+		if strings.EqualFold(model.Name, config.Auth.UserCollection) {
+			isJWT = true
+		}
+	}
+
 	data := struct {
 		ProjectName        string
 		Model              domain.Model
@@ -885,7 +897,7 @@ func (r *{{.Model.Name | title}}Repository) Delete(ctx context.Context, id strin
 		SelectColumns:      strings.Join(selectCols, ", "),
 		CreateTableSQL:     fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (%s)", model.Name, strings.Join(schemaCols, ", ")),
 		TotalFields:        len(allFields),
-		IsJWT:              config.Auth != nil && config.Auth.Provider == "jwt" && model.Name == config.Auth.UserCollection,
+		IsJWT:              isJWT,
 	}
 
 	content, err := template.Render(model.Name+"_repo", repoTemplate, data)
@@ -901,7 +913,11 @@ func generateEnvFile(projectPath string, config *domain.Config, fs domain.FileSy
 	buffer.WriteString("PORT=8080\n")
 
 	if config.Database.Type == "postgresql" || config.Database.Type == "mongodb" {
-		buffer.WriteString("DATABASE_URL=your_database_url_here\n")
+		url := config.Database.URL
+		if url == "" {
+			url = "your_database_url_here"
+		}
+		buffer.WriteString(fmt.Sprintf("DATABASE_URL=%s\n", url))
 	}
 
 	if config.Auth != nil && config.Auth.Enabled && config.Auth.Provider == "jwt" {
@@ -1038,8 +1054,12 @@ func main() {
 	{{if and .Auth .Auth.Enabled}}
 	// Auth Routes
 	authGroup := r.Group("/auth")
+	{{if eq .Auth.Provider "jwt"}}
 	authGroup.POST("/login", userHdl.Login)
 	authGroup.POST("/register", userHdl.Register)
+	{{else}}
+	authGroup.POST("/login", authService.AuthMiddleware(authSvc), userHdl.Login)
+	{{end}}
 	authGroup.GET("/me", authService.AuthMiddleware(authSvc), userHdl.GetMe)
 	authGroup.GET("/roles", authService.AuthMiddleware(authSvc), userHdl.GetRoles)
 	{{end}}
@@ -1166,8 +1186,14 @@ func generateTestScript(projectPath string, config *domain.Config, fs domain.Fil
 	buf.WriteString("echo \"Running tests...\"\n\n")
 
 	if config.Auth != nil && config.Auth.Enabled {
+		if config.Auth.Provider == "jwt" {
+			buf.WriteString("echo \"Testing POST /auth/register\"\n")
+			buf.WriteString("curl -X POST -H \"Authorization: Bearer mock-token\" -H \"Content-Type: application/json\" -d '{\"email\": \"test@example.com\", \"password\": \"password123\"}' http://localhost:8080/auth/register\n")
+			buf.WriteString("echo \"\\n\"\n")
+		}
+
 		buf.WriteString("echo \"Testing POST /auth/login\"\n")
-		buf.WriteString("curl -X POST -H \"Authorization: Bearer mock-token\" -H \"Content-Type: application/json\" -d '{\"role\": \"admin\"}' http://localhost:8080/auth/login\n")
+		buf.WriteString("curl -X POST -H \"Authorization: Bearer mock-token\" -H \"Content-Type: application/json\" -d '{\"email\": \"test@example.com\", \"password\": \"password123\"}' http://localhost:8080/auth/login\n")
 		buf.WriteString("echo \"\\n\"\n")
 	}
 

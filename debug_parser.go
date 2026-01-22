@@ -2,10 +2,7 @@ package main
 
 import (
 	"fmt"
-	"log"
-	"os"
 
-	"github.com/eduardo/blueprint/internal/infrastructure"
 	"github.com/eduardo/blueprint/internal/parser"
 )
 

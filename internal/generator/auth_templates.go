@@ -5,6 +5,7 @@ const AuthMiddlewareTemplate = `package auth
 import (
 	"context"
 	"net/http"
+	"os"
 	"strings"
 
 	"firebase.google.com/go/v4/auth"
@@ -58,6 +59,19 @@ func AuthMiddleware(service AuthService) gin.HandlerFunc {
 			return
 		}
 
+		// Check for MOCK_AUTH
+		if os.Getenv("MOCK_AUTH") == "true" && tokenString == "mock-token" {
+			c.Set("user", &auth.Token{
+				UID: "mock-user-id",
+				Claims: map[string]interface{}{
+					"email": "mock@example.com",
+					"role":  "admin",
+				},
+			})
+			c.Next()
+			return
+		}
+
 		token, err := service.VerifyIDToken(context.Background(), tokenString)
 		if err != nil {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
@@ -80,6 +94,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -204,6 +219,19 @@ func AuthMiddleware(service AuthService) gin.HandlerFunc {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
 				"error": "Invalid Authorization header format",
 			})
+			return
+		}
+
+		// Check for MOCK_AUTH
+		if os.Getenv("MOCK_AUTH") == "true" && tokenString == "mock-token" {
+			c.Set("user", &auth.Token{
+				UID: "mock-user-id",
+				Claims: map[string]interface{}{
+					"email": "mock@example.com",
+					"role":  "admin",
+				},
+			})
+			c.Next()
 			return
 		}
 
@@ -375,7 +403,6 @@ const JWTAuthHandlerTemplate = `package auth
 
 import (
 	"context"
-	"log"
 	"net/http"
 
 	"{{.ProjectName}}/internal/auth"
