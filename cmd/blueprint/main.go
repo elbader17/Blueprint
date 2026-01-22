@@ -27,19 +27,28 @@ func main() {
 
 	// 3. Parse and Generate
 	var filename string
+	var outputDir string
+	var err error
+
 	if len(os.Args) > 1 {
 		filename = os.Args[1]
+		if len(os.Args) > 2 {
+			outputDir = os.Args[2]
+		} else {
+			outputDir, err = os.Getwd()
+			if err != nil {
+				log.Fatalf("Failed to get current directory: %v", err)
+			}
+		}
 	} else {
-		var err error
 		filename, err = runInteractiveMode()
 		if err != nil {
 			log.Fatalf("Interactive mode failed: %v", err)
 		}
-	}
-
-	outputDir, err := os.Getwd()
-	if err != nil {
-		log.Fatalf("Failed to get current directory: %v", err)
+		outputDir, err = os.Getwd()
+		if err != nil {
+			log.Fatalf("Failed to get current directory: %v", err)
+		}
 	}
 
 	log.Printf("Generating project from blueprint: %s", filename)
@@ -48,8 +57,8 @@ func main() {
 	}
 
 	// 4. Run setup.sh (Optional/Manual step usually, but keeping it for compatibility)
-	// We need to know the project name, which is in the config. 
-	// Since we don't have the config here easily (it's inside the service), 
+	// We need to know the project name, which is in the config.
+	// Since we don't have the config here easily (it's inside the service),
 	// we might need to change the service to return it or just let the user run setup.sh.
 	// For now, I'll assume the user wants to run it manually or I'll just skip it if I can't easily get the project name.
 	// Actually, I'll just skip it to keep the main clean and follow the new architecture.
