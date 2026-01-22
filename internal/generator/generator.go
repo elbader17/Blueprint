@@ -280,7 +280,22 @@ func generateScripts(projectPath string, config *domain.Config, fs domain.FileSy
 	if err := generateSetupScript(projectPath, config, fs); err != nil {
 		return err
 	}
+	if err := generateRunScript(projectPath, config, fs); err != nil {
+		return err
+	}
 	return generateDocsScript(projectPath, fs)
+}
+
+func generateRunScript(projectPath string, config *domain.Config, fs domain.FileSystemPort) error {
+	var buf bytes.Buffer
+	buf.WriteString("#!/bin/bash\n\n")
+	buf.WriteString("echo \"Starting server...\"\n")
+	buf.WriteString("go run cmd/api/main.go\n")
+
+	if err := fs.WriteFile(filepath.Join(projectPath, "run.sh"), buf.Bytes()); err != nil {
+		return err
+	}
+	return fs.Chmod(filepath.Join(projectPath, "run.sh"), 0755)
 }
 
 func generateGoMod(projectPath string, config *domain.Config, fs domain.FileSystemPort) error {
