@@ -17,7 +17,7 @@ A powerful tool to generate Go API projects from a simple markdown blueprint.
 
 ## Prerequisites
 
-- [Go 1.21+](https://go.dev/dl/) installed.
+- [Go 1.23+](https://go.dev/dl/) installed.
 - A [Firebase](https://console.firebase.google.com/) project.
 
 ## Installation

@@ -156,7 +156,7 @@ services:
 
 func generateDockerfile(projectPath string, config *domain.Config, fs domain.FileSystemPort, template domain.TemplatePort) error {
 	const dockerfileTemplate = `# Build stage
-FROM golang:1.23-alpine AS builder
+FROM golang:1.23-alpine{{if eq .Database.Type "mongodb"}} AS builder
 WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
@@ -300,33 +300,33 @@ func generateRunScript(projectPath string, config *domain.Config, fs domain.File
 
 func generateGoMod(projectPath string, config *domain.Config, fs domain.FileSystemPort) error {
 	var deps []string
-	deps = append(deps, "github.com/gin-gonic/gin v1.9.1")
+	deps = append(deps, "github.com/gin-gonic/gin v1.10.0")
 	deps = append(deps, "github.com/swaggo/files v1.0.1")
 	deps = append(deps, "github.com/swaggo/gin-swagger v1.6.0")
-	deps = append(deps, "github.com/swaggo/swag v1.16.2")
-	deps = append(deps, "github.com/stretchr/testify v1.8.4")
+	deps = append(deps, "github.com/swaggo/swag v1.16.3")
+	deps = append(deps, "github.com/stretchr/testify v1.9.0")
 	deps = append(deps, "github.com/joho/godotenv v1.5.1")
 
 	if config.Auth != nil && config.Auth.Enabled {
 		deps = append(deps, "firebase.google.com/go/v4 v4.13.0")
 		if config.Auth.Provider == "jwt" {
-			deps = append(deps, "github.com/golang-jwt/jwt/v5 v5.2.0")
-			deps = append(deps, "golang.org/x/crypto v0.19.0")
+			deps = append(deps, "github.com/golang-jwt/jwt/v5 v5.2.1")
+			deps = append(deps, "golang.org/x/crypto v0.31.0")
 		}
 	}
 
 	if config.Payments != nil && config.Payments.Enabled && config.Payments.Provider == "stripe" {
-		deps = append(deps, "github.com/stripe/stripe-go/v76 v76.0.0")
+		deps = append(deps, "github.com/stripe/stripe-go/v76 v76.6.0")
 	}
 
 	switch config.Database.Type {
 	case "firestore":
-		deps = append(deps, "cloud.google.com/go/firestore v1.14.0")
-		deps = append(deps, "google.golang.org/api v0.150.0")
+		deps = append(deps, "cloud.google.com/go/firestore v1.25.0")
+		deps = append(deps, "google.golang.org/api v0.287.0")
 	case "postgresql":
-		deps = append(deps, "github.com/jackc/pgx/v5 v5.5.0")
+		deps = append(deps, "github.com/jackc/pgx/v5 v5.7.2")
 	case "mongodb":
-		deps = append(deps, "go.mongodb.org/mongo-driver v1.13.0")
+		deps = append(deps, "go.mongodb.org/mongo-driver v1.17.1")
 	}
 
 	content := fmt.Sprintf(`module %s
@@ -476,7 +476,7 @@ func (r *FirestoreRepository) Delete(ctx context.Context, collection, id string)
 }
 `
 	if config.FirestoreProjectID == "" {
-		config.FirestoreProjectID = "tiendaonline-mvp"
+		config.FirestoreProjectID = "your-firebase-project-id"
 	}
 
 	content, err := template.Render("firestore", firestoreTemplate, config)

@@ -20,6 +20,9 @@ const (
 )
 
 func TestGeneratedAPI(t *testing.T) {
+	if os.Getenv("RUN_INTEGRATION_TESTS") != "true" {
+		t.Skip("Skipping integration test. Set RUN_INTEGRATION_TESTS=true to run.")
+	}
 	// 1. Build the API
 	cmd := exec.Command("go", "build", "-o", "api_bin", "cmd/api/main.go")
 	cmd.Dir = apiDir

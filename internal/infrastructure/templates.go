@@ -2,8 +2,8 @@ package infrastructure
 
 import (
 	"bytes"
+	"html/template"
 	"strings"
-	"text/template"
 )
 
 // GoTemplateEngine implements domain.TemplatePort using text/template
