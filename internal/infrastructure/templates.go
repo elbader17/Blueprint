@@ -43,6 +43,9 @@ func (t *GoTemplateEngine) Render(name, tmpl string, data interface{}) ([]byte, 
 		"hasPrefix": func(s, prefix string) bool {
 			return strings.HasPrefix(s, prefix)
 		},
+		"join": func(elems []string, sep string) string {
+			return strings.Join(elems, sep)
+		},
 	}
 
 	tObj, err := template.New(name).Funcs(funcMap).Parse(tmpl)

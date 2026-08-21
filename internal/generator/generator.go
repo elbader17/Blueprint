@@ -41,6 +41,10 @@ func Generate(config *domain.Config, outputDir string, fs domain.FileSystemPort,
 		return err
 	}
 
+	if err := generateRateLimit(projectPath, config, fs, template); err != nil {
+		return err
+	}
+
 	for _, model := range config.Models {
 		if err := generateModelDomain(projectPath, config, model, fs, template); err != nil {
 			return err
@@ -236,6 +240,7 @@ func createDirectories(projectPath string, config *domain.Config, fs domain.File
 		"internal/handlers/auth",
 		"internal/payments",
 		"internal/config",
+		"internal/middleware",
 	}
 	for _, model := range config.Models {
 		dirs = append(dirs, filepath.Join("internal/handlers", strings.ToLower(model.Name)))
@@ -267,6 +272,17 @@ func generatePayments(projectPath string, config *domain.Config, fs domain.FileS
 		return nil
 	}
 	return generatePaymentFiles(projectPath, config, fs, template)
+}
+
+func generateRateLimit(projectPath string, config *domain.Config, fs domain.FileSystemPort, template domain.TemplatePort) error {
+	if config.RateLimit == nil || !config.RateLimit.Enabled {
+		return nil
+	}
+	content, err := template.Render("ratelimit", RateLimitTemplate, config)
+	if err != nil {
+		return err
+	}
+	return fs.WriteFile(filepath.Join(projectPath, "internal/middleware/ratelimit.go"), content)
 }
 
 func copyFirebaseCredentials(projectPath string, fs domain.FileSystemPort) error {
@@ -502,6 +518,9 @@ type {{.Model.Name | title}} struct {
 	{{range $k, $v := .Model.Relations}}
 	{{$k | pascal}} {{if hasPrefix $v "hasMany"}}[]string{{else}}string{{end}} ` + "`" + `json:"{{$k}}" bson:"{{$k}}"` + "`" + `
 	{{end}}
+	{{if .Model.SoftDelete}}
+	DeletedAt *time.Time ` + "`" + `json:"deleted_at,omitempty" bson:"deleted_at,omitempty"` + "`" + `
+	{{end}}
 }
 
 type {{.Model.Name | title}}Repository interface {
@@ -510,6 +529,7 @@ type {{.Model.Name | title}}Repository interface {
 	Create(ctx context.Context, model *{{.Model.Name | title}}) (string, error)
 	Update(ctx context.Context, id string, model *{{.Model.Name | title}}) error
 	Delete(ctx context.Context, id string) error
+	{{if .Model.SoftDelete}}HardDelete(ctx context.Context, id string) error{{end}}
 }
 `
 	data := struct {
@@ -531,8 +551,12 @@ func generateModelHandlers(projectPath string, config *domain.Config, model doma
 	const handlerTemplate = `package {{.Model.Name | lower}}
 
 import (
+	"errors"
 	"net/http"
+	"regexp"
 	"strconv"
+	"strings"
+	"time"
 	"{{.ProjectName}}/internal/domain"
 	"github.com/gin-gonic/gin"
 )
@@ -544,6 +568,40 @@ type {{.Model.Name | title}}Handler struct {
 func New{{.Model.Name | title}}Handler(repo domain.{{.Model.Name | title}}Repository) *{{.Model.Name | title}}Handler {
 	return &{{.Model.Name | title}}Handler{repo: repo}
 }
+
+{{if .HasValidations}}
+func validate{{.Model.Name | title}}(m *domain.{{.Model.Name | title}}) error {
+	{{range $field, $validation := .Validations}}
+	{{if $validation.Required}}
+	if m.{{$field | pascal}} == {{if eq (index $.FieldTypes $field) "string"}}{{else if eq (index $.FieldTypes $field) "integer"}}0{{else if eq (index $.FieldTypes $field) "float"}}0{{else if eq (index $.FieldTypes $field) "boolean"}}false{{end}} {
+		return errors.New("{{$field}} is required")
+	}
+	{{end}}
+	{{if $validation.Regex}}
+	if matched, _ := regexp.MatchString("{{$validation.Regex}}", {{if eq (index $.FieldTypes $field) "string"}}m.{{$field | pascal}}{{else}}fmt.Sprintf("%v", m.{{$field | pascal}}){{end}}); !matched {
+		return errors.New("{{$field}} has invalid format")
+	}
+	{{end}}
+	{{if $validation.EnumValues}}
+	valid{{$field | pascal}} := map[string]bool{ {{range $v := $validation.EnumValues}}"{{$v}}": true,{{end}} }
+	if !valid{{$field | pascal}}[string(m.{{$field | pascal}})] {
+		return errors.New("{{$field}} must be one of: {{join $validation.EnumValues ", "}}")
+	}
+	{{end}}
+	{{if $validation.Min}}
+	if m.{{$field | pascal}} < {{$validation.Min}} {
+		return errors.New("{{$field}} must be at least {{$validation.Min}}")
+	}
+	{{end}}
+	{{if $validation.Max}}
+	if m.{{$field | pascal}} > {{$validation.Max}} {
+		return errors.New("{{$field}} must be at most {{$validation.Max}}")
+	}
+	{{end}}
+	{{end}}
+	return nil
+}
+{{end}}
 
 func (h *{{.Model.Name | title}}Handler) List(c *gin.Context) {
 	limit := {{if .DefaultLimit}}{{.DefaultLimit}}{{else}}10{{end}}
@@ -584,6 +642,12 @@ func (h *{{.Model.Name | title}}Handler) Create(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	{{if .HasValidations}}
+	if err := validate{{.Model.Name | title}}(&m); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	{{end}}
 	id, err := h.repo.Create(c.Request.Context(), &m)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -600,6 +664,12 @@ func (h *{{.Model.Name | title}}Handler) Update(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	{{if .HasValidations}}
+	if err := validate{{.Model.Name | title}}(&m); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	{{end}}
 	if err := h.repo.Update(c.Request.Context(), id, &m); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -609,21 +679,39 @@ func (h *{{.Model.Name | title}}Handler) Update(c *gin.Context) {
 
 func (h *{{.Model.Name | title}}Handler) Delete(c *gin.Context) {
 	id := c.Param("id")
+	{{if .SoftDelete}}
+	now := time.Now()
+	m := &domain.{{.Model.Name | title}}{ID: id, DeletedAt: &now}
+	if err := h.repo.Update(c.Request.Context(), id, m); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "soft deleted"})
+	{{else}}
 	if err := h.repo.Delete(c.Request.Context(), id); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"status": "deleted"})
-}
+	{{end}}
+	}
 `
 	data := struct {
-		ProjectName  string
-		Model        domain.Model
-		DefaultLimit int
+		ProjectName   string
+		Model         domain.Model
+		DefaultLimit  int
+		HasValidations bool
+		Validations   map[string]domain.Validation
+		FieldTypes    map[string]string
+		SoftDelete    bool
 	}{
-		ProjectName:  config.ProjectName,
-		Model:        model,
-		DefaultLimit: 10,
+		ProjectName:   config.ProjectName,
+		Model:         model,
+		DefaultLimit:  10,
+		HasValidations: len(model.Validations) > 0,
+		Validations:   model.Validations,
+		FieldTypes:    model.Fields,
+		SoftDelete:    model.SoftDelete,
 	}
 	if config.Pagination != nil && config.Pagination.DefaultLimit > 0 {
 		data.DefaultLimit = config.Pagination.DefaultLimit
@@ -958,6 +1046,7 @@ import (
 	{{if and .Auth .Auth.Enabled}}{{if eq .Auth.Provider "firebase"}}"context"{{end}}{{end}}
 	"log"
 	"os"
+	"strconv"
 	{{if not (and .Auth .Auth.Enabled)}}
 	"net/http"
 	"strings"
@@ -976,6 +1065,9 @@ import (
 	{{end}}
 	{{if and .Payments .Payments.Enabled}}
 	"{{.ProjectName}}/internal/payments"
+	{{end}}
+	{{if and .RateLimit .RateLimit.Enabled}}
+	"{{.ProjectName}}/internal/middleware"
 	{{end}}
 	{{range .Models}}
 	"{{$.ProjectName}}/internal/handlers/{{.Name | lower}}"
@@ -1000,6 +1092,16 @@ func main() {
 		log.Fatalf("Failed to initialize database: %v", err)
 	}
 	defer baseRepo.Close()
+
+	{{if and .RateLimit .RateLimit.Enabled}}
+	// Initialize Rate Limiter
+	rateLimit := {{.RateLimit.RequestsPerMinute}}
+	if rl := os.Getenv("RATE_LIMIT"); rl != "" {
+		if val, err := strconv.Atoi(rl); err == nil && val > 0 {
+			rateLimit = val
+		}
+	}
+	{{end}}
 
 	{{if and .Auth .Auth.Enabled}}
 	// Initialize Auth Service
@@ -1062,6 +1164,11 @@ func main() {
 
 	// Setup Router
 	r := gin.Default()
+
+	{{if and .RateLimit .RateLimit.Enabled}}
+	// Apply rate limiting globally
+	r.Use(middleware.RateLimitMiddleware(rateLimit))
+	{{end}}
 
 	// Swagger Route
 	r.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler, ginSwagger.URL("/swagger/doc.json")))
