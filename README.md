@@ -140,6 +140,67 @@ Key architectural features:
 - **Guard Clauses**: Clean, readable code without nested `if-else`.
 - **Modular Handlers**: Model-specific logic organized in dedicated folders.
 
+## Database Migrations
+
+The CLI includes a migration system to manage database schema changes over time.
+
+### Building the Migration CLI
+
+```bash
+# Build main CLI
+go build -o blueprint ./cmd/blueprint
+
+# Build migration subcommand
+go build -o blueprint/migrate ./cmd/blueprint/migrate
+```
+
+### Usage
+
+```bash
+# Run pending migrations
+./blueprint migrate up
+
+# Rollback last migration
+./blueprint migrate down
+
+# Rollback N migrations
+./blueprint migrate down 2
+
+# Show migration status
+./blueprint migrate status
+
+# Generate migrations from a blueprint
+./blueprint migrate generate blueprint.md
+
+# Generate migrations to custom directory
+./blueprint migrate generate blueprint.md ./custom/migrations
+```
+
+### Environment Variables
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `DATABASE_URL` | Database connection URL | Required |
+| `MIGRATIONS_DIR` | Directory for migration files | `./migrations` |
+
+### Generated Files
+
+The migration system creates:
+
+**PostgreSQL:**
+- `migrations/postgresql/YYYYMMDDHHMMSS_initial_schema.up.sql` - Apply changes
+- `migrations/postgresql/YYYYMMDDHHMMSS_initial_schema.down.sql` - Revert changes
+
+**MongoDB:**
+- `migrations/mongodb/YYYYMMDDHHMMSS_initial_schema.up.js` - Apply changes
+- `migrations/mongodb/YYYYMMDDHHMMSS_initial_schema.down.js` - Revert changes
+
+### Schema Migrations Table
+
+Both databases track applied migrations:
+- **PostgreSQL**: `schema_migrations` table
+- **MongoDB**: `schema_migrations` collection
+
 ## Blueprint Configuration Guide
 
 The `blueprint.md` file is the heart of your project. It defines your API's architecture, database, authentication, and business logic in a single, human-readable file.

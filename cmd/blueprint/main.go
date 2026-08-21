@@ -2,8 +2,11 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
+	"os/exec"
+	"path/filepath"
 
 	"github.com/eduardo/blueprint/internal/application"
 	"github.com/eduardo/blueprint/internal/generator"
@@ -16,16 +19,61 @@ func main() {
 	defer f.Close()
 	log.SetOutput(f)
 
-	// 1. Initialize Adapters
+	if len(os.Args) > 1 && os.Args[1] == "migrate" {
+		runMigrateCommand()
+		return
+	}
+
+	runGenerateCommand()
+}
+
+func runMigrateCommand() {
+	execPath, err := os.Executable()
+	if err != nil {
+		log.Fatalf("Failed to get executable path: %v", err)
+	}
+
+	migratePath := filepath.Join(filepath.Dir(execPath), "blueprint", "migrate")
+	if _, err := os.Stat(migratePath); os.IsNotExist(err) {
+		migratePath, err = lookMigrateBinary()
+		if err != nil {
+			log.Fatalf("Migrate command not found. Please build with: go build -o blueprint ./cmd/blueprint && go build -o blueprint/migrate ./cmd/blueprint/migrate")
+		}
+	}
+
+	cmd := exec.Command(migratePath, os.Args[2:]...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Stdin = os.Stdin
+
+	if err := cmd.Run(); err != nil {
+		log.Fatalf("Migrate command failed: %v", err)
+	}
+}
+
+func lookMigrateBinary() (string, error) {
+	paths := []string{
+		"./blueprint/migrate",
+		"../blueprint/migrate",
+		"cmd/blueprint/migrate",
+	}
+
+	for _, p := range paths {
+		if _, err := os.Stat(p); err == nil {
+			return filepath.Abs(p)
+		}
+	}
+
+	return "", fmt.Errorf("migrate binary not found")
+}
+
+func runGenerateCommand() {
 	fs := infrastructure.NewOSFileSystem()
 	templateEngine := infrastructure.NewGoTemplateEngine()
 	markdownParser := parser.NewMarkdownParser(fs)
 
-	// 2. Initialize Application Service
-	// We pass the Generate function from the generator package as a dependency
 	blueprintService := application.NewBlueprintService(fs, templateEngine, markdownParser, generator.Generate)
 
-	// 3. Parse and Generate
 	var filename string
 	var outputDir string
 	var err error
@@ -56,11 +104,5 @@ func main() {
 		log.Fatalf("Failed to generate project: %v", err)
 	}
 
-	// 4. Run setup.sh (Optional/Manual step usually, but keeping it for compatibility)
-	// We need to know the project name, which is in the config.
-	// Since we don't have the config here easily (it's inside the service),
-	// we might need to change the service to return it or just let the user run setup.sh.
-	// For now, I'll assume the user wants to run it manually or I'll just skip it if I can't easily get the project name.
-	// Actually, I'll just skip it to keep the main clean and follow the new architecture.
 	log.Printf("Successfully generated project in %s", outputDir)
 }
